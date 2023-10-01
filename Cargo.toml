@@ -1,0 +1,39 @@
+[package]
+name = "ots-tool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+uuid = "1"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies.log]
+version = "0.4"
+
+[dependencies.pretty_env_logger]
+version = "0.5"
+
+[dependencies.futures]
+version = "0.3"
+
+[dependencies.bytemuck]
+version = "1"
+features = ["derive"]
+
+[dependencies.bitflags]
+version = "2"
+features = ["bytemuck"]
+
+[dependencies.bluez-async]
+version = "0.7"
+
+[dependencies.bluer]
+version = "0.16"
+default-features = false
+features = ["l2cap"]
+
+[dependencies.tokio]
+version = "1"
+features = ["macros", "rt", "rt-multi-thread"]
