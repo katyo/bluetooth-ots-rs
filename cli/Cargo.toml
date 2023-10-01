@@ -1,0 +1,29 @@
+[package]
+name = "ots-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+hex_pp = "0.1"
+
+[dependencies.clap]
+version = "4"
+features = ["derive"]
+
+[dependencies.log]
+version = "0.4"
+
+[dependencies.pretty_env_logger]
+version = "0.5"
+
+[dependencies.bluez-async]
+version = "0.7"
+
+[dependencies.tokio]
+version = "1"
+features = ["macros", "rt", "rt-multi-thread", "fs"]
+
+[dependencies.bluez-async-ots]
+version = "0.1"
+path = ".."

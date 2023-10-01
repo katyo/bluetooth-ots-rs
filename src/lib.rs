@@ -11,10 +11,10 @@ use bytemuck::{Pod, Zeroable};
 use futures::stream::StreamExt;
 use uuid::Uuid;
 
-use types::{OacpReq, OacpRes, OlcpReq, OlcpRes, U48};
+use types::{OacpReq, OacpRes, OlcpReq, OlcpRes, Ule48};
 
 pub use bluer::l2cap::SeqPacket;
-pub use types::{ActionFeature, ListFeature, SortOrder, WriteMode};
+pub use types::{ActionFeature, ListFeature, Property, SortOrder, WriteMode, Metadata};
 
 /// Object sizes (current and allocated)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable)]
@@ -170,9 +170,8 @@ impl OtsClient {
 
     /// Get current object identifier
     pub async fn id(&self) -> Result<u64> {
-        let id: U48 =
-            *bytemuck::from_bytes(&self.session.read_characteristic_value(&self.id_chr).await?);
-        Ok(id.into())
+        let raw = self.session.read_characteristic_value(&self.id_chr).await?;
+        Ok(Ule48::try_from(raw.as_ref())?.into())
     }
 
     /// Get current object name
@@ -190,13 +189,7 @@ impl OtsClient {
             .session
             .read_characteristic_value(&self.type_chr)
             .await?;
-
-        Ok(match raw.len() {
-            2 => bluez_async::uuid_from_u16(*bytemuck::from_bytes(&raw)),
-            4 => bluez_async::uuid_from_u32(*bytemuck::from_bytes(&raw)),
-            16 => Uuid::from_slice(&raw)?,
-            len => return Err(anyhow::anyhow!("Unexpedted type UUID length: {len}")),
-        })
+        types::uuid_from_raw(raw.as_ref())
     }
 
     /// Get sizes of current object
@@ -212,10 +205,47 @@ impl OtsClient {
         })
     }
 
+    /// Get current object properties
+    pub async fn props(&self) -> Result<Property> {
+        let raw = self
+            .session
+            .read_characteristic_value(&self.prop_chr)
+            .await?;
+        Property::try_from(raw.as_ref())
+    }
+
+    /// Get current object metadata
+    pub async fn metadata(&self) -> Result<Metadata> {
+        let id = self.id().await?;
+        let name = self.name().await?;
+        let type_ = self.type_().await?;
+        let (current_size, allocated_size) = if let Ok(size) = self.size().await {
+            (Some(size.current), Some(size.allocated))
+        } else {
+            (None, None)
+        };
+        let first_created = None; // TODO
+        let last_modified = None; // TODO
+        let properties = self.props().await.unwrap_or_default();
+
+        Ok(Metadata {
+            id,
+            name,
+            type_,
+            current_size,
+            allocated_size,
+            first_created,
+            last_modified,
+            properties,
+        })
+    }
+
     pub async fn socket(&self) -> Result<SeqPacket> {
         use bluer::l2cap::Socket;
 
         //let bindaddr = self.adapter_addr;
+        //let mut bindaddr = self.device_addr;
+        //bindaddr.addr = bluer::Address::any();
         let connaddr = self.device_addr;
         let socket = Socket::new_seq_packet()?;
         let opts = socket.l2cap_opts()?;
@@ -244,17 +274,71 @@ impl OtsClient {
         Ok(stream)
     }
 
-    pub async fn read(&self, offset: Option<usize>, length: Option<usize>) -> Result<SeqPacket> {
-        let offset = offset.unwrap_or(0);
+    /// Read object data
+    pub async fn read(&self, offset: usize, length: Option<usize>) -> Result<Vec<u8>> {
         let length = if let Some(length) = length {
             length
         } else {
             self.size().await?.current
         };
-        let stream = self.socket().await?;
-        //tokio::time::sleep(core::time::Duration::from_secs(1)).await;
-        self.do_read(offset, length).await?;
-        Ok(stream)
+
+        let mut data = Vec::with_capacity(length);
+        unsafe { data.set_len(length) };
+
+        self.read_to(offset, data.as_mut_slice()).await?;
+
+        Ok(data)
+    }
+
+    /// Read object data
+    pub async fn read_to(&self, offset: usize, buffer: &mut [u8]) -> Result<usize> {
+        // length cannot exceeds available length from offset to end
+        let length = buffer.len().min(self.size().await?.current - offset);
+
+        let sock = self.socket().await?;
+        let mtu = sock.recv_mtu()?;
+
+        let mut tmp_buf = Vec::with_capacity(mtu + 2);
+        unsafe { tmp_buf.set_len(mtu + 2) };
+
+        let mut read_off = offset;
+        let mut read_buf = &mut buffer[..length];
+
+        //let mut sdu = [0u8; 2];
+
+        while !read_buf.is_empty() {
+            let read_len = read_buf.len().min(mtu);
+            log::trace!("read: {read_len}, off: {read_off}");
+            self.do_read(read_off, read_len).await?;
+
+            //sock.recv(&mut sdu).await?;
+
+            let mut recv_buf = &mut read_buf[..read_len];
+            log::trace!("recv: {}", recv_buf.len());
+            let mut has_sdu_len = true;
+            while !recv_buf.is_empty() {
+                /*
+                let recv_len = tokio::time::timeout(core::time::Duration::from_secs(2),
+                                                    sock.recv(&mut recv_buf)).await
+                    .map_err(|_| anyhow::anyhow!("Receive timeout"))??;
+                recv_buf = &mut recv_buf[recv_len..];
+                */
+
+                let recv_len = tokio::time::timeout(core::time::Duration::from_secs(2),
+                                                    sock.recv(&mut tmp_buf)).await
+                    .map_err(|_| anyhow::anyhow!("Receive timeout"))??;
+                let recv_off = if has_sdu_len { has_sdu_len = false; 2 } else { 0 };
+                let recv_len = recv_len - recv_off;
+                recv_buf[..recv_len].copy_from_slice(&tmp_buf[recv_off..][..recv_len]);
+                recv_buf = &mut recv_buf[recv_len..];
+
+                log::trace!("recv: {recv_len}, remaining: {}", recv_buf.len());
+            }
+            read_off += read_len;
+            read_buf = &mut read_buf[read_len..];
+        }
+
+        Ok(length)
     }
 
     pub async fn write(

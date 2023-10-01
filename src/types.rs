@@ -29,34 +29,109 @@ bitflags! {
         const ClearMark = 1 << 3;
     }
 
+    /// Object property flags
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable, Default)]
+    #[repr(C)]
+    pub struct Property: u32 {
+        const Delete = 1 << 0;
+        const Execute = 1 << 1;
+        const Read = 1 << 2;
+        const Write = 1 << 3;
+        const Append = 1 << 4;
+        const Truncate = 1 << 5;
+        const Patch = 1 << 6;
+        const Mark = 1 << 7;
+    }
+
     /// Object write action mode flags
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable, Default)]
     #[repr(C)]
     pub struct WriteMode: u8 {
         const Truncate = 1 << 1;
     }
+
+    /// Object directory flags
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable, Default)]
+    #[repr(C)]
+    pub struct DirFlag: u8 {
+        const TypeUuid128 = 1 << 0;
+        const HasCurrentSize = 1 << 1;
+        const HasAllocatedSize = 1 << 2;
+        const HasFirstCreated = 1 << 3;
+        const HasLastModified = 1 << 4;
+        const HasProperties = 1 << 5;
+        const HasExtendedFlags = 1 << 7;
+    }
+}
+
+pub fn uuid_from_raw(raw: &[u8]) -> Result<Uuid, anyhow::Error> {
+    Ok(match raw.len() {
+        2 => bluez_async::uuid_from_u16(u16::from_le_bytes(*raw.split_array_ref_().0)),
+        4 => bluez_async::uuid_from_u32(u32::from_le_bytes(*raw.split_array_ref_().0)),
+        16 => Uuid::from_slice(&raw)?,
+        len => return Err(anyhow::anyhow!("Unexpedted type UUID length: {len}")),
+    })
+}
+
+impl TryFrom<[u8; 4]> for Property {
+    type Error = anyhow::Error;
+    fn try_from(raw: [u8; 4]) -> Result<Self, Self::Error> {
+        Self::from_bits(u32::from_le_bytes(raw)).ok_or_else(|| anyhow::anyhow!("Invalid properties"))
+    }
+}
+
+impl TryFrom<&[u8]> for Property {
+    type Error = anyhow::Error;
+    fn try_from(raw: &[u8]) -> Result<Self, Self::Error> {
+        if raw.len() < 4 {
+            anyhow::bail!("Not enough data for properties");
+        }
+        let (raw, _) = raw.split_array_ref_();
+        Self::try_from(*raw)
+    }
 }
 
 /// 48-bit unsigned int type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable)]
 #[repr(transparent)]
-pub struct U48 {
+pub struct Ule48 {
     raw: [u8; 6],
 }
 
-impl From<u64> for U48 {
+impl TryFrom<&[u8]> for Ule48 {
+    type Error = anyhow::Error;
+    fn try_from(raw: &[u8]) -> Result<Self, Self::Error> {
+        if raw.len() < 6 {
+            anyhow::bail!("Not enough data for U48");
+        }
+        let (raw, _) = raw.split_array_ref_();
+        Ok(Self::from(*raw))
+    }
+}
+
+impl From<[u8; 6]> for Ule48 {
+    fn from(raw: [u8; 6]) -> Self {
+        Self { raw }
+    }
+}
+
+impl From<Ule48> for [u8; 6] {
+    fn from(Ule48 { raw }: Ule48) -> Self {
+        raw
+    }
+}
+
+impl From<u64> for Ule48 {
     fn from(val: u64) -> Self {
         Self {
-            raw: *bytemuck::from_bytes(&val.to_ne_bytes()[..6]),
+            raw: *val.to_le_bytes().as_ref().split_array_ref_().0,
         }
     }
 }
 
-impl From<U48> for u64 {
-    fn from(val: U48) -> Self {
-        let mut res = 0u64;
-        unsafe { core::mem::transmute::<_, &mut [u8; 6]>(&mut res) }.copy_from_slice(&val.raw);
-        res
+impl From<Ule48> for u64 {
+    fn from(Ule48 { raw }: Ule48) -> Self {
+        Self::from_le_bytes([raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], 0, 0])
     }
 }
 
@@ -226,14 +301,21 @@ impl TryFrom<&[u8]> for OlcpRes {
     fn try_from(raw: &[u8]) -> Result<Self, Self::Error> {
         use OlcpRes::*;
 
+        if raw.len() < 3 {
+            anyhow::bail!("Not enought list response data");
+        }
+
         if !matches!(raw[0].try_into()?, OlcpOp::Response) {
             return Err(anyhow::anyhow!("Isn't a response"));
         }
 
         match raw[2].try_into()? {
             OlcpRc::Success => Ok(if matches!(raw[1].try_into()?, OlcpOp::NumberOf) {
+                if raw.len() < 7 {
+                    anyhow::bail!("Not enought number data");
+                }
                 NumberOf {
-                    count: *bytemuck::from_bytes(&raw[2..][..4]),
+                    count: u32::from_le_bytes(*raw[3..].as_ref().split_array_ref_().0),
                 }
             } else {
                 None
@@ -324,21 +406,171 @@ impl TryFrom<&[u8]> for OacpRes {
     fn try_from(raw: &[u8]) -> Result<Self, Self::Error> {
         use OacpRes::*;
 
+        if raw.len() < 3 {
+            anyhow::bail!("Not enought action response data");
+        }
+
         if !matches!(raw[0].try_into()?, OacpOp::Response) {
             return Err(anyhow::anyhow!("Isn't a response"));
         }
 
         match raw[2].try_into()? {
             OacpRc::Success => Ok(match raw[1].try_into()? {
-                OacpOp::CheckSum => CheckSum {
-                    value: *bytemuck::from_bytes(&raw[2..][..4]),
-                },
+                OacpOp::CheckSum => {
+                    if raw.len() < 7 {
+                        anyhow::bail!("Not enought checksum data");
+                    }
+                    CheckSum {
+                        value: u32::from_le_bytes(*raw[3..].as_ref().split_array_ref_().0),
+                    }
+                }
                 OacpOp::Execute => Execute {
-                    param: raw[2..].into(),
+                    param: raw[3..].into(),
                 },
                 _ => None,
             }),
             rc => Err(anyhow::anyhow!("Operation error: {rc}")),
         }
+    }
+}
+
+/// Object metadata
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(C)]
+pub struct Metadata {
+    pub id: u64,
+    pub name: String,
+    pub type_: Uuid,
+    pub current_size: Option<usize>,
+    pub allocated_size: Option<usize>,
+    pub first_created: Option<u64>,
+    pub last_modified: Option<u64>,
+    pub properties: Property,
+}
+
+impl Metadata {
+    pub fn split_dir_entry(raw: &[u8]) -> Result<Option<(&[u8], &[u8])>, anyhow::Error> {
+        if raw.len() == 0 {
+            return Ok(None);
+        }
+        if raw.len() < 13 {
+            anyhow::bail!("Not enought data for record ({} < 13)", raw.len());
+        }
+        let (record_len, _) = raw.split_array_ref_();
+        let record_len = u16::from_le_bytes(*record_len) as usize;
+        if raw.len() < record_len {
+            anyhow::bail!("Not enought data for reading record ({} < {record_len})", raw.len());
+        }
+        let (rec, rest) = raw.split_at(record_len);
+        Ok(Some((&rec[2..], rest)))
+    }
+}
+
+impl TryFrom<&[u8]> for Metadata {
+    type Error = anyhow::Error;
+    fn try_from(raw: &[u8]) -> Result<Self, Self::Error> {
+        if raw.len() < 11 {
+            anyhow::bail!("Not enought data");
+        }
+        let (id, raw) = raw.split_array_ref_();
+        let id: u64 = Ule48::from(*id).into();
+        let (name_len, raw) = raw.split_array_ref_();
+        let name_len = u8::from_le_bytes(*name_len) as usize;
+        if raw.len() < name_len + 1 + 2 {
+            anyhow::bail!("Not enought data for string and flags");
+        }
+        let (name, raw) = raw.split_at(name_len);
+        let name = core::str::from_utf8(name)?.into();
+        let (flags, raw) = raw.split_array_ref_();
+        let flags = DirFlag::from_bits(u8::from_le_bytes(*flags))
+            .ok_or_else(|| anyhow::anyhow!("Invalid directoyy flags"))?;
+        let (type_, raw) = if flags.contains(DirFlag::TypeUuid128) {
+            if raw.len() < 16 {
+                anyhow::bail!("Not enought data for type UUID");
+            }
+            let (uuid, raw) = raw.split_array_ref_();
+            (Uuid::from_bytes(*uuid), raw)
+        } else {
+            let (uuid, raw) = raw.split_array_ref_();
+            (bluez_async::uuid_from_u16(u16::from_le_bytes(*uuid)), raw)
+        };
+        let (current_size, raw) = if flags.contains(DirFlag::HasCurrentSize) {
+            if raw.len() < 4 {
+                anyhow::bail!("Not enought data for allocated size");
+            }
+            let (size, raw) = raw.split_array_ref_();
+            let size = u32::from_le_bytes(*size);
+            (Some(size as usize), raw)
+        } else {
+            (None, raw)
+        };
+        let (allocated_size, raw) = if flags.contains(DirFlag::HasAllocatedSize) {
+            if raw.len() < 4 {
+                anyhow::bail!("Not enought data for allocated size");
+            }
+            let (size, raw) = raw.split_array_ref_();
+            let size = u32::from_le_bytes(*size);
+            (Some(size as usize), raw)
+        } else {
+            (None, raw)
+        };
+        let (first_created, raw) = if flags.contains(DirFlag::HasFirstCreated) {
+            if raw.len() < 7 {
+                anyhow::bail!("Not enought data for first created");
+            }
+            let (time, raw) = raw.split_array_ref_();
+            let _time: &[u8; 7] = time;
+            // TODO
+            //(Some(time), raw)
+            (None, raw)
+        } else {
+            (None, raw)
+        };
+        let (last_modified, raw) = if flags.contains(DirFlag::HasFirstCreated) {
+            if raw.len() < 7 {
+                anyhow::bail!("Not enought data for last modified");
+            }
+            let (time, raw) = raw.split_array_ref_();
+            let _time: &[u8; 7] = time;
+            // TODO
+            //(Some(time), raw)
+            (None, raw)
+        } else {
+            (None, raw)
+        };
+        let (properties, _raw) = if flags.contains(DirFlag::HasProperties) {
+            if raw.len() < 4 {
+                anyhow::bail!("Not enought data for properties");
+            }
+            let (props, raw) = raw.split_array_ref_();
+            let props = Property::try_from(*props)?;
+            (props, raw)
+        } else {
+            (Property::default(), raw)
+        };
+        Ok(Self {
+            id,
+            name,
+            type_,
+            current_size,
+            allocated_size,
+            first_created,
+            last_modified,
+            properties,
+        })
+    }
+}
+
+trait SliceExt {
+    type V;
+    fn split_array_ref_<const N: usize>(&self) -> (&[Self::V; N], &[Self::V]);
+}
+
+impl<T> SliceExt for &[T] {
+    type V = T;
+    fn split_array_ref_<const N: usize>(&self) -> (&[T; N], &[T]) {
+        let (a, b) = self.split_at(N);
+        // SAFETY: a points to [T; N]? Yes it's [T] of length N (checked by split_at)
+        unsafe { (&*(a.as_ptr() as *const [T; N]), b) }
     }
 }
