@@ -1,19 +1,19 @@
 mod ids;
 mod types;
+mod l2cap;
 
 use anyhow::Result;
-use bluer::l2cap::SocketAddr;
 use bluez_async::{
-    AddressType, BluetoothEvent, BluetoothSession, CharacteristicEvent, CharacteristicId, DeviceId,
-    MacAddress,
+    BluetoothEvent, BluetoothSession, CharacteristicEvent, CharacteristicId, DeviceId,
 };
 use bytemuck::{Pod, Zeroable};
 use futures::stream::StreamExt;
 use uuid::Uuid;
 
+use l2cap::{L2capSockAddr as SocketAddr, L2capSocket as Socket, L2capStream as Stream, SocketType};
 use types::{OacpReq, OacpRes, OlcpReq, OlcpRes, Ule48};
 
-pub use bluer::l2cap::SeqPacket;
+pub use l2cap::{Security, SecurityLevel};
 pub use types::{ActionFeature, ListFeature, Property, SortOrder, WriteMode, Metadata};
 
 /// Object sizes (current and allocated)
@@ -24,22 +24,11 @@ pub struct Sizes {
     pub allocated: usize,
 }
 
-fn sockaddr(mac_address: MacAddress, address_type: AddressType) -> SocketAddr {
-    const PSM_L2CAP_CID_OTS: u16 = 0x0025;
-
-    let addr = bluer::Address::new(mac_address.into());
-    let addr_type = match address_type {
-        AddressType::Public => bluer::AddressType::LePublic,
-        AddressType::Random => bluer::AddressType::LeRandom,
-    };
-
-    SocketAddr::new(addr, addr_type, PSM_L2CAP_CID_OTS)
-}
-
 /// Object Transfer Service (OTS) client
 pub struct OtsClient {
     session: BluetoothSession,
     device_id: DeviceId,
+    adapter_addr: SocketAddr,
     device_addr: SocketAddr,
     oacp_feat: ActionFeature,
     olcp_feat: ListFeature,
@@ -122,7 +111,6 @@ impl OtsClient {
         log::debug!("Prop Char: {prop_chr:#?}");
         let prop_chr = prop_chr.id;
 
-        /*
         let mut adapter_and_device_info = None;
         for adapter_info in session.get_adapters().await? {
             if let Some(device_info) = session
@@ -137,15 +125,14 @@ impl OtsClient {
         }
         let (adapter_info, device_info) = adapter_and_device_info
             .ok_or_else(|| anyhow::anyhow!("Unable to find device adapter pair"))?;
-        */
 
-        let device_info = session.get_device_info(device_id).await?;
+        //let device_info = session.get_device_info(device_id).await?;
 
         Ok(Self {
             session: session.clone(),
             device_id: device_id.clone(),
-            //adapter_addr: sockaddr(adapter_info.mac_address, adapter_info.address_type),
-            device_addr: sockaddr(device_info.mac_address, device_info.address_type),
+            adapter_addr: SocketAddr::new_cid_ots(adapter_info.mac_address, adapter_info.address_type),
+            device_addr: SocketAddr::new_cid_ots(device_info.mac_address, device_info.address_type),
             oacp_feat,
             olcp_feat,
             oacp_chr,
@@ -240,123 +227,136 @@ impl OtsClient {
         })
     }
 
-    pub async fn socket(&self) -> Result<SeqPacket> {
-        use bluer::l2cap::Socket;
-
-        //let bindaddr = self.adapter_addr;
-        //let mut bindaddr = self.device_addr;
-        //bindaddr.addr = bluer::Address::any();
-        let connaddr = self.device_addr;
-        let socket = Socket::new_seq_packet()?;
-        let opts = socket.l2cap_opts()?;
-        let flow_control = socket.flow_control();
-        let security = socket.security()?;
-        log::debug!("L2CAP: {opts:?} {flow_control:?} {security:?}");
-        //log::debug!("Bind to {bindaddr:?}");
-        //socket.bind(bindaddr)?;
-        log::debug!("Connect to {connaddr:?}");
+    async fn socket(&self) -> Result<Stream> {
+        let socket = Socket::new(SocketType::SEQPACKET)?;
+        socket.set_security(&l2cap::Security {
+            level: l2cap::SecurityLevel::Medium,
+            ..Default::default()
+        })?;
+        log::debug!("{:?}", socket.security()?);
+        log::debug!("Bind to {:?}", self.adapter_addr);
+        socket.bind(&self.adapter_addr)?;
+        log::debug!("Connect to {:?}", self.device_addr);
         let stream =
-            tokio::time::timeout(core::time::Duration::from_secs(5), socket.connect(connaddr))
+            tokio::time::timeout(core::time::Duration::from_secs(2), socket.connect(&self.device_addr))
                 .await
                 .map_err(|_| anyhow::anyhow!("Connection timedout"))??;
         log::debug!(
-            "Local/Remote address: {:?}/{:?}",
-            stream.as_ref().local_addr()?,
+            "Local/Peer Address: {:?}/{:?}",
+            stream.local_addr()?,
             stream.peer_addr()?
         );
         log::debug!(
             "Send/Recv MTU: {:?}/{}",
-            stream.as_ref().send_mtu(),
-            stream.as_ref().recv_mtu()?
+            stream.send_mtu(),
+            stream.recv_mtu()?
         );
-        log::debug!("Security: {:?}", stream.as_ref().security()?);
-        log::debug!("Flow control: {:?}", stream.as_ref().flow_control());
+        log::debug!("Security: {:?}", stream.security()?);
         Ok(stream)
     }
 
     /// Read object data
     pub async fn read(&self, offset: usize, length: Option<usize>) -> Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+
         let length = if let Some(length) = length {
             length
         } else {
             self.size().await?.current
         };
 
-        let mut data = Vec::with_capacity(length);
-        unsafe { data.set_len(length) };
+        let mut buffer = Vec::with_capacity(length);
+        unsafe { buffer.set_len(length) };
 
-        self.read_to(offset, data.as_mut_slice()).await?;
+        let mut stm = self.read_base(offset, length).await?;
 
-        Ok(data)
+        stm.read_exact(&mut buffer[..length]).await?;
+
+        Ok(buffer)
     }
 
     /// Read object data
     pub async fn read_to(&self, offset: usize, buffer: &mut [u8]) -> Result<usize> {
+        use tokio::io::AsyncReadExt;
+
+        let size = self.size().await?.current;
+
         // length cannot exceeds available length from offset to end
-        let length = buffer.len().min(self.size().await?.current - offset);
+        let length = buffer.len().min(size - offset);
 
-        let sock = self.socket().await?;
-        let mtu = sock.recv_mtu()?;
+        let mut stm = self.read_base(offset, length).await?;
 
-        let mut tmp_buf = Vec::with_capacity(mtu + 2);
-        unsafe { tmp_buf.set_len(mtu + 2) };
-
-        let mut read_off = offset;
-        let mut read_buf = &mut buffer[..length];
-
-        //let mut sdu = [0u8; 2];
-
-        while !read_buf.is_empty() {
-            let read_len = read_buf.len().min(mtu);
-            log::trace!("read: {read_len}, off: {read_off}");
-            self.do_read(read_off, read_len).await?;
-
-            //sock.recv(&mut sdu).await?;
-
-            let mut recv_buf = &mut read_buf[..read_len];
-            log::trace!("recv: {}", recv_buf.len());
-            let mut has_sdu_len = true;
-            while !recv_buf.is_empty() {
-                /*
-                let recv_len = tokio::time::timeout(core::time::Duration::from_secs(2),
-                                                    sock.recv(&mut recv_buf)).await
-                    .map_err(|_| anyhow::anyhow!("Receive timeout"))??;
-                recv_buf = &mut recv_buf[recv_len..];
-                */
-
-                let recv_len = tokio::time::timeout(core::time::Duration::from_secs(2),
-                                                    sock.recv(&mut tmp_buf)).await
-                    .map_err(|_| anyhow::anyhow!("Receive timeout"))??;
-                let recv_off = if has_sdu_len { has_sdu_len = false; 2 } else { 0 };
-                let recv_len = recv_len - recv_off;
-                recv_buf[..recv_len].copy_from_slice(&tmp_buf[recv_off..][..recv_len]);
-                recv_buf = &mut recv_buf[recv_len..];
-
-                log::trace!("recv: {recv_len}, remaining: {}", recv_buf.len());
-            }
-            read_off += read_len;
-            read_buf = &mut read_buf[read_len..];
-        }
+        stm.read_exact(&mut buffer[..length]).await?;
 
         Ok(length)
     }
 
-    pub async fn write(
+    /// Read object data
+    pub async fn read_stream(&self, offset: usize, length: Option<usize>) -> Result<Stream> {
+        let size = self.size().await?.current;
+
+        // length cannot exceeds available length from offset to end
+        let length = length.unwrap_or(size).min(size - offset);
+
+        self.read_base(offset, length).await
+    }
+
+    async fn read_base(&self, offset: usize, length: usize) -> Result<Stream> {
+        let stm = self.socket().await?;
+
+        self.do_read(offset, length).await?;
+
+        log::debug!("recv/send mtu: {}/{}", stm.recv_mtu()?, stm.send_mtu()?);
+
+        Ok(stm)
+    }
+
+    /// Write object data
+    pub async fn write(&self, offset: usize, buffer: &[u8], mode: Option<WriteMode>) -> Result<usize> {
+        use tokio::io::AsyncWriteExt;
+
+        let mode = mode.unwrap_or_default();
+        let size = self.size().await?.allocated;
+
+        // length cannot exceeds available length from offset to end
+        let length = buffer.len().min(size - offset);
+
+        let mut stm = self.write_base(offset, length, mode).await?;
+
+        stm.write_all(&buffer[..length]).await?;
+
+        Ok(length)
+    }
+
+    /// Write object data
+    pub async fn write_stream(
         &self,
-        offset: Option<usize>,
+        offset: usize,
         length: Option<usize>,
         mode: Option<WriteMode>,
-    ) -> Result<SeqPacket> {
-        let offset = offset.unwrap_or(0);
-        let length = if let Some(length) = length {
-            length
-        } else {
-            self.size().await?.allocated
-        };
-        let mode = mode.unwrap_or(WriteMode::default());
-        let stream = self.socket().await?;
+    ) -> Result<Stream> {
+        let mode = mode.unwrap_or_default();
+        let size = self.size().await?.allocated;
+
+        // length cannot exceeds available length from offset to end
+        let length = length.unwrap_or(size).min(size - offset);
+
+        self.write_base(offset, length, mode).await
+    }
+
+    async fn write_base(
+        &self,
+        offset: usize,
+        length: usize,
+        mode: WriteMode,
+    ) -> Result<Stream> {
+        let stm = self.socket().await?;
+
         self.do_write(offset, length, mode).await?;
-        Ok(stream)
+
+        log::debug!("recv/send mtu: {}/{}", stm.recv_mtu()?, stm.send_mtu()?);
+
+        Ok(stm)
     }
 
     async fn oacp_op(&self, req: &OacpReq) -> Result<OacpRes> {

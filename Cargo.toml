@@ -9,6 +9,8 @@ members = ["cli"]
 [dependencies]
 anyhow = "1"
 uuid = "1"
+libc = "0.2"
+socket2 = "0.5"
 
 [dependencies.log]
 version = "0.4"
@@ -27,12 +29,12 @@ features = ["bytemuck"]
 [dependencies.bluez-async]
 version = "0.7"
 
-[dependencies.bluer]
-version = "0.16"
-default-features = false
-features = ["l2cap"]
+#[dependencies.bluer]
+#version = "0.16"
+#default-features = false
+#features = ["l2cap"]
 
 [dependencies.tokio]
 version = "1"
 default-features = false
-features = ["time"]
+features = ["time", "io-util"]

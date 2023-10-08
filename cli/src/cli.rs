@@ -1,6 +1,7 @@
 use bluez_async::MacAddress;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use either::Either;
 
 /// Object Transfer Service client
 #[derive(Parser, Debug)]
@@ -10,17 +11,21 @@ pub struct Args {
     #[arg(short, long)]
     pub disco: Option<u32>,
 
-    /// Device address to connect to
-    #[arg(short, long)]
-    pub address: Option<MacAddress>,
+    /// Adapter address or name to use
+    #[arg(short, long, value_parser = mac_or_name)]
+    pub adapter: Option<Either<MacAddress, String>>,
 
-    /// Device name to connect to
-    #[arg(short, long)]
-    pub name: Option<String>,
+    /// Device name or address to connect to
+    #[arg(short, long, value_parser = mac_or_name)]
+    pub device: Either<MacAddress, String>,
 
     /// Client action to do
     #[command(subcommand)]
     pub action: Action,
+}
+
+fn mac_or_name(val: &str) -> Result<Either<MacAddress, String>, String> {
+    Ok(val.parse().map(Either::Left).ok().unwrap_or_else(|| Either::Right(val.into())))
 }
 
 #[derive(Subcommand, Debug)]

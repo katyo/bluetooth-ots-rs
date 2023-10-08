@@ -3,6 +3,7 @@ use bluez_async::BluetoothSession;
 use bluez_async_ots::{Metadata, OtsClient};
 use core::time::Duration;
 use tokio::time::sleep;
+use either::Either;
 
 mod cli;
 
@@ -14,10 +15,32 @@ async fn main() -> Result<()> {
 
     let (_, bs) = BluetoothSession::new().await?;
 
+    let adapter_id = if let Some(mac_or_name) = &args.adapter {
+        Some(bs.get_adapters().await?.into_iter().filter(|adp| match (mac_or_name, &adp.mac_address, &adp.name, &adp.alias) {
+            (Either::Left(req_addr), adp_addr, _, _) if req_addr == adp_addr => true,
+            (Either::Right(req_name), _, adp_name, adp_alias) if req_name == adp_name || req_name == adp_alias => true,
+            _ => false,
+        }).next().ok_or_else(|| anyhow::anyhow!("No adapter found"))?.id)
+    } else {
+        None
+    };
+
     if let Some(secs) = &args.disco {
-        bs.start_discovery().await?;
+        if let Some(id) = &adapter_id {
+            log::info!("Start discovery on {id:?}");
+            bs.start_discovery_on_adapter(id).await?;
+        } else {
+            log::info!("Start discovery");
+            bs.start_discovery().await?;
+        }
         sleep(Duration::from_secs(*secs as _)).await;
-        bs.stop_discovery().await?;
+        if let Some(id) = &adapter_id {
+            log::info!("Stop discovery on {id:?}");
+            bs.stop_discovery_on_adapter(id).await?;
+        } else {
+            log::info!("Start discovery");
+            bs.stop_discovery().await?;
+        }
     }
 
     let devs = bs.get_devices().await?;
@@ -25,9 +48,9 @@ async fn main() -> Result<()> {
     let dev = devs
         .into_iter()
         .filter(
-            |dev| match (&args.address, &dev.mac_address, &args.name, &dev.name) {
-                (Some(req_addr), dev_addr, _, _) if req_addr == dev_addr => true,
-                (_, _, Some(req_name), Some(dev_name)) if req_name == dev_name => true,
+            |dev| match (&args.device, &dev.mac_address, &dev.name) {
+                (Either::Left(req_addr), dev_addr, _) if req_addr == dev_addr => true,
+                (Either::Right(req_name), _, Some(dev_name)) if req_name == dev_name => true,
                 _ => false,
             },
         )
@@ -71,7 +94,7 @@ impl cli::ListArgs {
             match ots.read(0, None).await {
                 Ok(data) => {
                     log::debug!("Directory data size: {}", data.len());
-                    return self.print_directory_data(&data);
+                    return self.print_directory_data(&data, ots).await;
                 }
                 Err(error) => {
                     log::warn!("Unable to read directory data due to: {error:?}");
@@ -149,17 +172,29 @@ impl cli::ListArgs {
         Ok(())
     }
 
-    fn print_directory_data(&self, data: &[u8]) -> Result<()> {
+    async fn print_directory_data(&self, data: &[u8], ots: &bluez_async_ots::OtsClient) -> Result<()> {
         let mut data = data;
         let mut index = 0;
 
-        println!("{}", HexDump(data));
+        //println!("{}", HexDump(data));
 
         //println!("{:?}", Metadata::split_dir_entry(data));
 
         while let Some((entry, rest)) = Metadata::split_dir_entry(data)? {
-            println!("{}", HexDump(entry));
-            let meta = Metadata::try_from(entry)?;
+            //println!("{}", HexDump(entry));
+            let mut meta = Metadata::try_from(entry)?;
+
+            if self.cur_size() && meta.current_size.is_none() || self.alloc_size() && meta.allocated_size.is_none() {
+                // try fill sizes from meta
+                ots.go_to(meta.id).await?;
+                let size = ots.size().await?;
+                if meta.current_size.is_none() {
+                    meta.current_size = size.current.into();
+                }
+                if meta.allocated_size.is_none() {
+                    meta.allocated_size = size.allocated.into();
+                }
+            }
 
             print!("{index}");
             if self.id() {
