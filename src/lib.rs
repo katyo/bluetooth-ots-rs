@@ -1,6 +1,6 @@
 mod ids;
-mod types;
 mod l2cap;
+mod types;
 
 use anyhow::Result;
 use bluez_async::{
@@ -10,11 +10,13 @@ use bytemuck::{Pod, Zeroable};
 use futures::stream::StreamExt;
 use uuid::Uuid;
 
-use l2cap::{L2capSockAddr as SocketAddr, L2capSocket as Socket, L2capStream as Stream, SocketType};
+use l2cap::{
+    L2capSockAddr as SocketAddr, L2capSocket as Socket, L2capStream as Stream, SocketType,
+};
 use types::{OacpReq, OacpRes, OlcpReq, OlcpRes, Ule48};
 
 pub use l2cap::{Security, SecurityLevel};
-pub use types::{ActionFeature, ListFeature, Property, SortOrder, WriteMode, Metadata};
+pub use types::{ActionFeature, ListFeature, Metadata, Property, SortOrder, WriteMode};
 
 /// Object sizes (current and allocated)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable)]
@@ -126,13 +128,17 @@ impl OtsClient {
         let (adapter_info, device_info) = adapter_and_device_info
             .ok_or_else(|| anyhow::anyhow!("Unable to find device adapter pair"))?;
 
-        //let device_info = session.get_device_info(device_id).await?;
+        let adapter_addr =
+            SocketAddr::new_le_dyn_start(adapter_info.mac_address, adapter_info.address_type);
+
+        let device_addr =
+            SocketAddr::new_le_cid_ots(device_info.mac_address, device_info.address_type);
 
         Ok(Self {
             session: session.clone(),
             device_id: device_id.clone(),
-            adapter_addr: SocketAddr::new_cid_ots(adapter_info.mac_address, adapter_info.address_type),
-            device_addr: SocketAddr::new_cid_ots(device_info.mac_address, device_info.address_type),
+            adapter_addr,
+            device_addr,
             oacp_feat,
             olcp_feat,
             oacp_chr,
@@ -237,10 +243,12 @@ impl OtsClient {
         log::debug!("Bind to {:?}", self.adapter_addr);
         socket.bind(&self.adapter_addr)?;
         log::debug!("Connect to {:?}", self.device_addr);
-        let stream =
-            tokio::time::timeout(core::time::Duration::from_secs(2), socket.connect(&self.device_addr))
-                .await
-                .map_err(|_| anyhow::anyhow!("Connection timedout"))??;
+        let stream = tokio::time::timeout(
+            core::time::Duration::from_secs(2),
+            socket.connect(&self.device_addr),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Connection timedout"))??;
         log::debug!(
             "Local/Peer Address: {:?}/{:?}",
             stream.local_addr()?,
@@ -312,10 +320,9 @@ impl OtsClient {
     }
 
     /// Write object data
-    pub async fn write(&self, offset: usize, buffer: &[u8], mode: Option<WriteMode>) -> Result<usize> {
+    pub async fn write(&self, offset: usize, buffer: &[u8], mode: WriteMode) -> Result<usize> {
         use tokio::io::AsyncWriteExt;
 
-        let mode = mode.unwrap_or_default();
         let size = self.size().await?.allocated;
 
         // length cannot exceeds available length from offset to end
@@ -333,9 +340,8 @@ impl OtsClient {
         &self,
         offset: usize,
         length: Option<usize>,
-        mode: Option<WriteMode>,
+        mode: WriteMode,
     ) -> Result<Stream> {
-        let mode = mode.unwrap_or_default();
         let size = self.size().await?.allocated;
 
         // length cannot exceeds available length from offset to end
@@ -344,12 +350,7 @@ impl OtsClient {
         self.write_base(offset, length, mode).await
     }
 
-    async fn write_base(
-        &self,
-        offset: usize,
-        length: usize,
-        mode: WriteMode,
-    ) -> Result<Stream> {
+    async fn write_base(&self, offset: usize, length: usize, mode: WriteMode) -> Result<Stream> {
         let stm = self.socket().await?;
 
         self.do_write(offset, length, mode).await?;

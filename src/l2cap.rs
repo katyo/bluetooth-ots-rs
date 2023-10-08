@@ -1,6 +1,13 @@
-use bluez_async::{MacAddress, AddressType};
-use core::{pin::Pin, task::{Context, Poll}, mem::{MaybeUninit, size_of}};
-use std::{io::{Result, Error}, os::fd::{AsRawFd, RawFd}};
+use bluez_async::{AddressType, MacAddress};
+use core::{
+    mem::{size_of, MaybeUninit},
+    pin::Pin,
+    task::{Context, Poll},
+};
+use std::{
+    io::{Error, Result},
+    os::fd::{AsRawFd, RawFd},
+};
 
 pub use socket2::Type as SocketType;
 
@@ -19,18 +26,28 @@ enum BTPROTO {
     RFCOMM = 3,
 }
 
-const PSM_L2CAP_CID_OTS: u16 = 0x0025;
+const PSM_L2CAP_LE_CID_OTS: u16 = 0x25;
+const PSM_L2CAP_LE_DYN_START: u16 = 0x80;
 
 const BT_SNDMTU: i32 = 12;
 const BT_RCVMTU: i32 = 13;
 
 impl L2capSockAddr {
     pub fn new(addr: MacAddress, type_: AddressType, psm: u16) -> Self {
-        Self { addr, type_, psm, cid: 0 }
+        Self {
+            addr,
+            type_,
+            psm,
+            cid: 0,
+        }
     }
 
-    pub fn new_cid_ots(mac_address: MacAddress, address_type: AddressType) -> L2capSockAddr {
-        Self::new(mac_address, address_type, PSM_L2CAP_CID_OTS)
+    pub fn new_le_cid_ots(mac_address: MacAddress, address_type: AddressType) -> L2capSockAddr {
+        Self::new(mac_address, address_type, PSM_L2CAP_LE_CID_OTS)
+    }
+
+    pub fn new_le_dyn_start(mac_address: MacAddress, address_type: AddressType) -> L2capSockAddr {
+        Self::new(mac_address, address_type, PSM_L2CAP_LE_DYN_START)
     }
 }
 
@@ -70,7 +87,10 @@ impl TryFrom<socket2::SockAddr> for L2capSockAddr {
         let sockaddr_ref = unsafe { &*(&addr_storage as *const _ as *const sockaddr_l2) };
 
         if sockaddr_ref.l2_family != libc::AF_BLUETOOTH as _ {
-            return Err(Error::new(std::io::ErrorKind::InvalidInput, "Bluetooth address family expected"));
+            return Err(Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Bluetooth address family expected",
+            ));
         }
 
         Ok(Self {
@@ -78,7 +98,12 @@ impl TryFrom<socket2::SockAddr> for L2capSockAddr {
             type_: match sockaddr_ref.l2_bdaddr_type {
                 1 => AddressType::Public,
                 2 => AddressType::Random,
-                _ => return Err(Error::new(std::io::ErrorKind::InvalidInput, "Unknown L2CAP address type")),
+                _ => {
+                    return Err(Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Unknown L2CAP address type",
+                    ))
+                }
             },
             psm: sockaddr_ref.l2_psm,
             cid: sockaddr_ref.l2_cid,
@@ -104,9 +129,7 @@ impl From<&MacAddress> for bdaddr_t {
             addr
         };
 
-        Self {
-            b: addr
-        }
+        Self { b: addr }
     }
 }
 
@@ -161,7 +184,11 @@ pub struct L2capSocket {
 
 impl L2capSocket {
     pub fn new(type_: SocketType) -> Result<Self> {
-        let inner = socket2::Socket::new(libc::AF_BLUETOOTH.into(), type_, Some((BTPROTO::L2CAP as i32).into()))?;
+        let inner = socket2::Socket::new(
+            libc::AF_BLUETOOTH.into(),
+            type_,
+            Some((BTPROTO::L2CAP as i32).into()),
+        )?;
         Ok(Self { inner })
     }
 
@@ -247,7 +274,7 @@ impl tokio::io::AsyncRead for L2capStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>
+        buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         use std::io::Read;
 
@@ -255,11 +282,16 @@ impl tokio::io::AsyncRead for L2capStream {
             let mut guard = futures::ready!(self.inner.poll_read_ready_mut(cx)?);
 
             let unfilled = buf.initialize_unfilled();
-            match guard.try_io(|inner| inner.get_mut().inner.read(unsafe { &mut *(unfilled as *mut _ as *mut _) })) {
+            match guard.try_io(|inner| {
+                inner
+                    .get_mut()
+                    .inner
+                    .read(unsafe { &mut *(unfilled as *mut _ as *mut _) })
+            }) {
                 Ok(Ok(len)) => {
                     buf.advance(len);
                     return Poll::Ready(Ok(()));
-                },
+                }
                 Ok(Err(err)) => return Poll::Ready(Err(err)),
                 Err(_would_block) => continue,
             }
@@ -271,7 +303,7 @@ impl tokio::io::AsyncWrite for L2capStream {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &[u8]
+        buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         //use std::io::Write;
 
@@ -285,19 +317,16 @@ impl tokio::io::AsyncWrite for L2capStream {
         }
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         // tcp flush is a no-op
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        self.inner.get_ref().inner.shutdown(std::net::Shutdown::Write)?;
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.inner
+            .get_ref()
+            .inner
+            .shutdown(std::net::Shutdown::Write)?;
         Poll::Ready(Ok(()))
     }
 }
@@ -305,8 +334,15 @@ impl tokio::io::AsyncWrite for L2capStream {
 fn getsockopt<T>(socket: &impl AsRawFd, level: libc::c_int, optname: libc::c_int) -> Result<T> {
     let mut optval: MaybeUninit<T> = MaybeUninit::uninit();
     let mut optlen: libc::socklen_t = size_of::<T>() as _;
-    if unsafe { libc::getsockopt(socket.as_raw_fd(), level, optname, optval.as_mut_ptr() as *mut _, &mut optlen) }
-    == -1
+    if unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            level,
+            optname,
+            optval.as_mut_ptr() as *mut _,
+            &mut optlen,
+        )
+    } == -1
     {
         return Err(Error::last_os_error());
     }
@@ -317,10 +353,22 @@ fn getsockopt<T>(socket: &impl AsRawFd, level: libc::c_int, optname: libc::c_int
     Ok(optval)
 }
 
-fn setsockopt<T>(socket: &impl AsRawFd, level: libc::c_int, optname: libc::c_int, optval: &T) -> Result<()> {
+fn setsockopt<T>(
+    socket: &impl AsRawFd,
+    level: libc::c_int,
+    optname: libc::c_int,
+    optval: &T,
+) -> Result<()> {
     let optlen: libc::socklen_t = size_of::<T>() as _;
-    if unsafe { libc::setsockopt(socket.as_raw_fd(), level, optname, optval as *const _ as *const _, optlen) }
-    == -1
+    if unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            level,
+            optname,
+            optval as *const _ as *const _,
+            optlen,
+        )
+    } == -1
     {
         return Err(Error::last_os_error());
     }

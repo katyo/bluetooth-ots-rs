@@ -76,7 +76,8 @@ pub fn uuid_from_raw(raw: &[u8]) -> Result<Uuid, anyhow::Error> {
 impl TryFrom<[u8; 4]> for Property {
     type Error = anyhow::Error;
     fn try_from(raw: [u8; 4]) -> Result<Self, Self::Error> {
-        Self::from_bits(u32::from_le_bytes(raw)).ok_or_else(|| anyhow::anyhow!("Invalid properties"))
+        Self::from_bits(u32::from_le_bytes(raw))
+            .ok_or_else(|| anyhow::anyhow!("Invalid properties"))
     }
 }
 
@@ -459,7 +460,10 @@ impl Metadata {
         let (record_len, _) = raw.split_array_ref_();
         let record_len = u16::from_le_bytes(*record_len) as usize;
         if raw.len() < record_len {
-            anyhow::bail!("Not enought data for reading record ({} < {record_len})", raw.len());
+            anyhow::bail!(
+                "Not enought data for reading record ({} < {record_len})",
+                raw.len()
+            );
         }
         let (rec, rest) = raw.split_at(record_len);
         Ok(Some((&rec[2..], rest)))

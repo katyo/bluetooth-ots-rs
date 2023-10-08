@@ -1,14 +1,14 @@
 use bluez_async::MacAddress;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 use either::Either;
+use std::path::PathBuf;
 
 /// Object Transfer Service client
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// Discovery for N seconds
-    #[arg(short, long)]
+    #[arg(short = 't', long)]
     pub disco: Option<u32>,
 
     /// Adapter address or name to use
@@ -25,7 +25,11 @@ pub struct Args {
 }
 
 fn mac_or_name(val: &str) -> Result<Either<MacAddress, String>, String> {
-    Ok(val.parse().map(Either::Left).ok().unwrap_or_else(|| Either::Right(val.into())))
+    Ok(val
+        .parse()
+        .map(Either::Left)
+        .ok()
+        .unwrap_or_else(|| Either::Right(val.into())))
 }
 
 #[derive(Subcommand, Debug)]
@@ -35,6 +39,9 @@ pub enum Action {
 
     /// Read object data
     Read(ReadArgs),
+
+    /// Write object data
+    Write(WriteArgs),
 }
 
 /// Object list flags
@@ -139,6 +146,29 @@ pub struct ReadArgs {
     ///
     /// If file is set the binary data will be written to.
     /// Otherwise the hex data will be printed to stdout.
+    #[arg(short, long)]
+    pub file: Option<PathBuf>,
+}
+
+/// Object write options
+#[derive(Parser, Debug)]
+pub struct WriteArgs {
+    /// Object to write
+    #[command(flatten)]
+    pub object: ObjSel,
+
+    /// Data slice to write
+    #[command(flatten)]
+    pub range: RangeSel,
+
+    /// Truncate data size after write
+    #[arg(short, long)]
+    pub truncate: bool,
+
+    /// File to input data
+    ///
+    /// If file is set the binary data will be read from.
+    /// Otherwise the hex data will be read from stdin.
     #[arg(short, long)]
     pub file: Option<PathBuf>,
 }

@@ -2,10 +2,13 @@ use anyhow::Result;
 use bluez_async::BluetoothSession;
 use bluez_async_ots::{Metadata, OtsClient};
 use core::time::Duration;
-use tokio::time::sleep;
 use either::Either;
+use tokio::{io::AsyncReadExt, time::sleep};
 
 mod cli;
+
+#[cfg(feature = "readline")]
+mod rl;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -16,11 +19,25 @@ async fn main() -> Result<()> {
     let (_, bs) = BluetoothSession::new().await?;
 
     let adapter_id = if let Some(mac_or_name) = &args.adapter {
-        Some(bs.get_adapters().await?.into_iter().filter(|adp| match (mac_or_name, &adp.mac_address, &adp.name, &adp.alias) {
-            (Either::Left(req_addr), adp_addr, _, _) if req_addr == adp_addr => true,
-            (Either::Right(req_name), _, adp_name, adp_alias) if req_name == adp_name || req_name == adp_alias => true,
-            _ => false,
-        }).next().ok_or_else(|| anyhow::anyhow!("No adapter found"))?.id)
+        Some(
+            bs.get_adapters()
+                .await?
+                .into_iter()
+                .filter(
+                    |adp| match (mac_or_name, &adp.mac_address, &adp.name, &adp.alias) {
+                        (Either::Left(req_addr), adp_addr, _, _) if req_addr == adp_addr => true,
+                        (Either::Right(req_name), _, adp_name, adp_alias)
+                            if req_name == adp_name || req_name == adp_alias =>
+                        {
+                            true
+                        }
+                        _ => false,
+                    },
+                )
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("No adapter found"))?
+                .id,
+        )
     } else {
         None
     };
@@ -47,13 +64,11 @@ async fn main() -> Result<()> {
 
     let dev = devs
         .into_iter()
-        .filter(
-            |dev| match (&args.device, &dev.mac_address, &dev.name) {
-                (Either::Left(req_addr), dev_addr, _) if req_addr == dev_addr => true,
-                (Either::Right(req_name), _, Some(dev_name)) if req_name == dev_name => true,
-                _ => false,
-            },
-        )
+        .filter(|dev| match (&args.device, &dev.mac_address, &dev.name) {
+            (Either::Left(req_addr), dev_addr, _) if req_addr == dev_addr => true,
+            (Either::Right(req_name), _, Some(dev_name)) if req_name == dev_name => true,
+            _ => false,
+        })
         .next()
         .ok_or_else(|| anyhow::anyhow!("No device found"))?;
     log::debug!("Device: {dev:#?}");
@@ -75,6 +90,7 @@ async fn main() -> Result<()> {
     match args.action {
         List(list) => list.run(&ots).await?,
         Read(read) => read.run(&ots).await?,
+        Write(write) => write.run(&ots).await?,
     }
 
     if !connected {
@@ -172,19 +188,24 @@ impl cli::ListArgs {
         Ok(())
     }
 
-    async fn print_directory_data(&self, data: &[u8], ots: &bluez_async_ots::OtsClient) -> Result<()> {
+    async fn print_directory_data(
+        &self,
+        data: &[u8],
+        ots: &bluez_async_ots::OtsClient,
+    ) -> Result<()> {
         let mut data = data;
         let mut index = 0;
 
         //println!("{}", HexDump(data));
-
         //println!("{:?}", Metadata::split_dir_entry(data));
 
         while let Some((entry, rest)) = Metadata::split_dir_entry(data)? {
             //println!("{}", HexDump(entry));
             let mut meta = Metadata::try_from(entry)?;
 
-            if self.cur_size() && meta.current_size.is_none() || self.alloc_size() && meta.allocated_size.is_none() {
+            if self.cur_size() && meta.current_size.is_none()
+                || self.alloc_size() && meta.allocated_size.is_none()
+            {
                 // try fill sizes from meta
                 ots.go_to(meta.id).await?;
                 let size = ots.size().await?;
@@ -230,6 +251,103 @@ impl cli::ListArgs {
     }
 }
 
+impl cli::ReadArgs {
+    pub async fn run(&self, ots: &OtsClient) -> Result<()> {
+        self.object.select(ots).await?;
+
+        let data = ots.read(self.range.offset, self.range.length).await?;
+
+        if let Some(file) = &self.file {
+            tokio::fs::write(file, data).await?;
+        } else {
+            print!("{}", HexDump(&data));
+        }
+
+        Ok(())
+    }
+}
+
+impl cli::WriteArgs {
+    pub async fn run(&self, ots: &OtsClient) -> Result<()> {
+        self.object.select(ots).await?;
+
+        let data = if let Some(file) = &self.file {
+            if file == std::path::Path::new("-") {
+                // read from stdin
+                let mut data = Vec::new();
+                tokio::io::stdin().read_to_end(&mut data).await?;
+                data
+            } else {
+                // read from file
+                tokio::fs::read(file).await?
+            }
+        } else {
+            #[cfg(feature = "readline")]
+            {
+                log::trace!("readline begin");
+                if let Some(data) = rl::read_hex().await? {
+                    log::trace!("readline end: {}", HexDump(&data));
+                    data
+                } else {
+                    return Ok(());
+                }
+            }
+
+            #[cfg(not(feature = "readline"))]
+            {
+                // read from stdin
+                let mut data = Vec::new();
+                tokio::io::stdin().read_to_end(&mut data).await?;
+                let chars = core::str::from_utf8(&data)?.chars();
+                let mut data = Vec::with_capacity(data.len() / 2);
+                let mut half = None;
+                for chr in chars {
+                    if chr.is_whitespace() {
+                        // skip spaces
+                        continue;
+                    }
+                    if let Some(dig) = chr.to_digit(16) {
+                        let dig = dig as u8;
+                        if let Some(half) = half.take() {
+                            data.push(half | dig);
+                        } else {
+                            half = Some(dig << 4);
+                        }
+                    } else {
+                        anyhow::bail!("Hexadecimal data expected");
+                    }
+                }
+                data
+            }
+        };
+
+        let data = if let Some(len) = self.range.length {
+            if data.len() > len {
+                eprintln!(
+                    "Input data will be truncated to {len} bytes because length argument used"
+                );
+                &data[..len]
+            } else {
+                &data[..]
+            }
+        } else {
+            &data[..]
+        };
+
+        log::trace!("{}", HexDump(data));
+
+        let mode = if self.truncate {
+            bluez_async_ots::WriteMode::Truncate
+        } else {
+            bluez_async_ots::WriteMode::default()
+        };
+
+        ots.write(self.range.offset, &data, mode).await?;
+
+        Ok(())
+    }
+}
+
 impl cli::ObjSel {
     pub async fn select(&self, ots: &OtsClient) -> Result<()> {
         if let Some(req_index) = self.index {
@@ -259,23 +377,5 @@ struct HexDump<T>(T);
 impl<T: AsRef<[u8]>> core::fmt::Display for HexDump<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         hex_pp::pretty_hex_write(f, &self.0)
-    }
-}
-
-impl cli::ReadArgs {
-    pub async fn run(&self, ots: &OtsClient) -> Result<()> {
-        self.object.select(ots).await?;
-
-        let data = ots
-            .read(self.range.offset.into(), self.range.length)
-            .await?;
-
-        if let Some(file) = &self.file {
-            tokio::fs::write(file, data).await?;
-        } else {
-            print!("{}", HexDump(&data));
-        }
-
-        Ok(())
     }
 }
