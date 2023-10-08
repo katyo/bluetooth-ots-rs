@@ -1,4 +1,3 @@
-use anyhow::Result;
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers},
     terminal,
@@ -29,35 +28,37 @@ impl<F: InputFilter> InputReader<F> {
 
         // TODO: test terminal for interactive mode
 
-        Ok(Self { events, filter })
+        Ok(Self {
+            events,
+            filter,
+            cursor: 0,
+        })
     }
 
     pub async fn read(&mut self, line: &mut String) -> std::io::Result<InputEvent> {
         loop {
             match self.events.next().await {
-                Some(Ok(Event::Key(event))) => {
-                    match event {
-                        KeyEvent {
-                            modifiers: KeyModifiers::CONTROL,
-                            code: KeyCode::Char(chr),
-                            ..
-                        } => match chr {
-                            'c' => return Ok(InputEvent::Int),
-                            'd' => return Ok(InputEvent::End),
-                            _ => continue,
-                        },
-                        KeyEvent { code, .. } => match code {
-                            KeyCode::Esc => return Ok(InputEvent::Int),
-                            KeyCode::Enter => return Ok(InputEvent::Ret),
-                            KeyCode::Backspace => {
-                                line.pop();
-                                continue;
-                            }
-                        },
-                        //KeyEvent { code: KeyCode::Char(chr) } =>
+                Some(Ok(Event::Key(event))) => match event {
+                    KeyEvent {
+                        modifiers: KeyModifiers::CONTROL,
+                        code: KeyCode::Char(chr),
+                        ..
+                    } => match chr {
+                        'c' => return Ok(InputEvent::Int),
+                        'd' => return Ok(InputEvent::End),
                         _ => continue,
-                    }
-                }
+                    },
+                    KeyEvent { code, .. } => match code {
+                        KeyCode::Esc => return Ok(InputEvent::Int),
+                        KeyCode::Enter => return Ok(InputEvent::Ret),
+                        KeyCode::Backspace => {
+                            line.pop();
+                            continue;
+                        }
+                        _ => continue,
+                    },
+                },
+                _ => (),
             }
         }
     }

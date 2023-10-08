@@ -1,5 +1,5 @@
 use bluez_async::BluetoothSession;
-use bluez_async_ots::{Metadata, OtsClient};
+use bluez_async_ots::{DirEntries, OtsClient};
 use core::time::Duration;
 use either::Either;
 use tokio::{io::AsyncReadExt, time::sleep};
@@ -27,10 +27,12 @@ pub enum Error {
     NoAdapter,
     #[error("No device found")]
     NoDevice,
-    #[error("Bad hexadecimal data")]
-    HexError,
+    #[error("No object found")]
+    NoObject,
     #[error("Need any of index, id or name to select object to read")]
     ObjIdError,
+    #[error("Bad hexadecimal data")]
+    HexError,
 }
 
 impl From<std::string::FromUtf8Error> for Error {
@@ -52,7 +54,7 @@ async fn main() -> Result<()> {
             bs.get_adapters()
                 .await?
                 .into_iter()
-                .filter(
+                .find(
                     |adp| match (mac_or_name, &adp.mac_address, &adp.name, &adp.alias) {
                         (Either::Left(req_addr), adp_addr, _, _) if req_addr == adp_addr => true,
                         (Either::Right(req_name), _, adp_name, adp_alias)
@@ -63,7 +65,6 @@ async fn main() -> Result<()> {
                         _ => false,
                     },
                 )
-                .next()
                 .ok_or_else(|| Error::NoAdapter)?
                 .id,
         )
@@ -93,12 +94,11 @@ async fn main() -> Result<()> {
 
     let dev = devs
         .into_iter()
-        .filter(|dev| match (&args.device, &dev.mac_address, &dev.name) {
+        .find(|dev| match (&args.device, &dev.mac_address, &dev.name) {
             (Either::Left(req_addr), dev_addr, _) if req_addr == dev_addr => true,
             (Either::Right(req_name), _, Some(dev_name)) if req_name == dev_name => true,
             _ => false,
         })
-        .next()
         .ok_or_else(|| Error::NoDevice)?;
     log::debug!("Device: {dev:#?}");
 
@@ -117,9 +117,10 @@ async fn main() -> Result<()> {
 
     use cli::Action::*;
     match args.action {
-        List(list) => list.run(&ots).await?,
-        Read(read) => read.run(&ots).await?,
-        Write(write) => write.run(&ots).await?,
+        Info(args) => args.run(&ots).await?,
+        List(args) => args.run(&ots).await?,
+        Read(args) => args.run(&ots).await?,
+        Write(args) => args.run(&ots).await?,
     }
 
     if !connected {
@@ -130,12 +131,24 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+impl cli::InfoArgs {
+    pub async fn run(&self, ots: &OtsClient) -> Result<()> {
+        if self.action() {
+            println!("Object action features: {}", ots.action_features());
+        }
+        if self.list() {
+            println!("Object list features: {}", ots.list_features());
+        }
+        Ok(())
+    }
+}
+
 impl cli::ListArgs {
     pub async fn run(&self, ots: &OtsClient) -> Result<()> {
         self.print_header();
 
         // try read special directory object first
-        if ots.go_to(0).await.is_ok() {
+        if self.dir && ots.go_to(0).await.is_ok() {
             match ots.read(0, None).await {
                 Ok(data) => {
                     log::debug!("Directory data size: {}", data.len());
@@ -173,6 +186,18 @@ impl cli::ListArgs {
                 print!("allocated");
             }
         }
+        if self.any_time() {
+            println!("\ttime ");
+            if self.crt_time() {
+                print!("created");
+            }
+            if self.mod_time() {
+                if self.mod_time() {
+                    print!("/");
+                }
+                print!("modified");
+            }
+        }
         if self.props() {
             print!("\tprops");
         }
@@ -184,7 +209,9 @@ impl cli::ListArgs {
         for index in 0.. {
             print!("{index}");
             if self.id() {
-                print!("\t{}", ots.id().await?);
+                if let Some(id) = ots.id().await? {
+                    print!("\t{}", id);
+                }
             }
             if self.name() {
                 print!("\t{:?}", ots.name().await?);
@@ -205,12 +232,28 @@ impl cli::ListArgs {
                     print!("{}", size.allocated);
                 }
             }
+            if self.any_time() {
+                print!("\t");
+                if self.crt_time() {
+                    if let Some(dt) = ots.first_created().await? {
+                        print!("{dt}");
+                    }
+                }
+                if self.mod_time() {
+                    if let Some(dt) = ots.last_modified().await? {
+                        if self.crt_time() {
+                            print!("/");
+                        }
+                        print!("{dt}");
+                    }
+                }
+            }
             if self.props() {
-                print!("\t{:?}", ots.props().await?);
+                print!("\t{}", ots.properties().await?);
             }
             println!();
 
-            if ots.next().await.is_err() {
+            if !ots.next().await? {
                 break;
             }
         }
@@ -220,23 +263,21 @@ impl cli::ListArgs {
     async fn print_directory_data(
         &self,
         data: &[u8],
-        ots: &bluez_async_ots::OtsClient,
+        _ots: &bluez_async_ots::OtsClient,
     ) -> Result<()> {
-        let mut data = data;
-        let mut index = 0;
-
         //println!("{}", HexDump(data));
-        //println!("{:?}", Metadata::split_dir_entry(data));
 
-        while let Some((entry, rest)) = Metadata::split_dir_entry(data)? {
-            //println!("{}", HexDump(entry));
-            let mut meta = Metadata::try_from(entry)?;
+        for (index, ent) in DirEntries::from(data).enumerate() {
+            let meta = ent?;
 
+            /*
             if self.cur_size() && meta.current_size.is_none()
                 || self.alloc_size() && meta.allocated_size.is_none()
             {
                 // try fill sizes from meta
-                ots.go_to(meta.id).await?;
+                if let Some(id) = meta.id {
+                    ots.go_to(id).await?;
+                }
                 let size = ots.size().await?;
                 if meta.current_size.is_none() {
                     meta.current_size = size.current.into();
@@ -245,10 +286,13 @@ impl cli::ListArgs {
                     meta.allocated_size = size.allocated.into();
                 }
             }
+            */
 
             print!("{index}");
             if self.id() {
-                print!("\t{}", meta.id);
+                if let Some(id) = &meta.id {
+                    print!("\t{}", id);
+                }
             }
             if self.name() {
                 print!("\t{:?}", meta.name);
@@ -268,13 +312,13 @@ impl cli::ListArgs {
                     print!("{}", meta.allocated_size.unwrap());
                 }
             }
+            if self.any_time() {
+                print!("\t");
+            }
             if self.props() {
-                print!("\t{:?}", meta.properties);
+                print!("\t{}", meta.properties);
             }
             println!();
-
-            data = rest;
-            index += 1;
         }
         Ok(())
     }
@@ -371,7 +415,7 @@ impl cli::WriteArgs {
             bluez_async_ots::WriteMode::default()
         };
 
-        ots.write(self.range.offset, &data, mode).await?;
+        ots.write(self.range.offset, data, mode).await?;
 
         Ok(())
     }
@@ -382,17 +426,23 @@ impl cli::ObjSel {
         if let Some(req_index) = self.index {
             ots.first().await?;
             for _ in 0..req_index {
-                ots.next().await?;
+                if !ots.next().await? {
+                    return Err(Error::NoObject);
+                }
             }
         } else if let Some(req_id) = self.id {
-            ots.go_to(req_id).await?;
+            if !ots.go_to(req_id).await? {
+                return Err(Error::ObjIdError);
+            }
         } else if let Some(req_name) = &self.name {
             ots.first().await?;
             loop {
                 if &ots.name().await? == req_name {
                     break;
                 }
-                ots.next().await?;
+                if !ots.next().await? {
+                    return Err(Error::NoObject);
+                }
             }
         } else {
             return Err(Error::ObjIdError);

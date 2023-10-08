@@ -1,9 +1,13 @@
+#![forbid(future_incompatible)]
+#![deny(bad_style, missing_docs)]
+
 mod ids;
 mod l2cap;
 mod types;
 
 use bluez_async::{
-    BluetoothEvent, BluetoothSession, CharacteristicEvent, CharacteristicId, DeviceId, BluetoothError,
+    BluetoothError, BluetoothEvent, BluetoothSession, CharacteristicEvent, CharacteristicId,
+    DeviceId,
 };
 use bytemuck::{Pod, Zeroable};
 use futures::stream::StreamExt;
@@ -12,10 +16,13 @@ use uuid::Uuid;
 use l2cap::{
     L2capSockAddr as SocketAddr, L2capSocket as Socket, L2capStream as Stream, SocketType,
 };
-use types::{OacpReq, OacpRes, OlcpReq, OlcpRes, Ule48, OpType};
+use types::{ActionReq, ActionRes, ListReq, ListRes, OpType, Ule48};
 
 pub use l2cap::{Security, SecurityLevel};
-pub use types::{ActionFeature, ListFeature, Metadata, Property, SortOrder, WriteMode, OlcpRc, OacpRc, DateTime};
+pub use types::{
+    ActionFeature, ActionRc, DateTime, DirEntries, ListFeature, ListRc, Metadata, Property,
+    SortOrder, WriteMode,
+};
 
 /// OTS client result
 pub type Result<T> = core::result::Result<T, Error>;
@@ -23,36 +30,64 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// OTS client error
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    /// Input/output error
     #[error("Input/Output Error: {0}")]
     IoError(#[from] std::io::Error),
+    /// Bluetooth error
     #[error("Bluetooth error: {0}")]
     BtError(#[from] BluetoothError),
+    /// UTF-8 decoding error
     #[error("Invalid UTF8 string: {0}")]
     Utf8Error(#[from] core::str::Utf8Error),
+    /// UUID decoding error
     #[error("Invalid UUID: {0}")]
     UuidError(#[from] uuid::Error),
+    /// Not supported function requested
+    #[error("Not supported")]
+    NotSupported,
+    /// Object not found
     #[error("Not found")]
     NotFound,
+    /// No response received
     #[error("No response")]
     NoResponse,
+    /// Invalid response received
     #[error("Invalid response")]
     BadResponse,
+    /// Invalid UUID size
     #[error("Invalid UUID size: {0}")]
     BadUuidSize(usize),
-    #[error("Connection timeout")]
+    /// Timeout reached
+    #[error("Timeout reached")]
     Timeout,
+    /// Object list operation failed
     #[error("Object list error: {0:?}")]
-    ListError(#[from] OlcpRc),
+    ListError(#[from] ListRc),
+    /// Object action operation failed
     #[error("Object action error: {0:?}")]
-    ActionError(#[from] OacpRc),
+    ActionError(#[from] ActionRc),
+    /// Invalid properties received
     #[error("Invalid properties: {0:08x?}")]
     InvalidProps(u32),
+    /// Invalid directory flags received
     #[error("Invalid directory flags: {0:02x?}")]
     InvalidDirFlags(u8),
+    /// Not enough data to parse
     #[error("Not enough data ({actual} < {needed})")]
-    NotEnoughData { actual: usize, needed: usize },
+    NotEnoughData {
+        /// Actual size
+        actual: usize,
+        /// Expected size
+        needed: usize,
+    },
+    /// Invalid operation code received
     #[error("Invalid opcode for {type_}: {code:02x?}")]
-    BadOpCode { type_: OpType, code: u8 },
+    BadOpCode {
+        /// Operation type
+        type_: OpType,
+        /// Operation code
+        code: u8,
+    },
 }
 
 impl From<std::string::FromUtf8Error> for Error {
@@ -65,7 +100,9 @@ impl From<std::string::FromUtf8Error> for Error {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable)]
 #[repr(C)]
 pub struct Sizes {
+    /// Current size of object
     pub current: usize,
+    /// Allocated size of object
     pub allocated: usize,
 }
 
@@ -75,24 +112,24 @@ pub struct OtsClient {
     device_id: DeviceId,
     adapter_addr: SocketAddr,
     device_addr: SocketAddr,
-    oacp_feat: ActionFeature,
-    olcp_feat: ListFeature,
+    action_features: ActionFeature,
+    list_features: ListFeature,
     oacp_chr: CharacteristicId,
-    olcp_chr: CharacteristicId,
-    id_chr: CharacteristicId,
+    olcp_chr: Option<CharacteristicId>,
+    id_chr: Option<CharacteristicId>,
     name_chr: CharacteristicId,
     type_chr: CharacteristicId,
     size_chr: CharacteristicId,
     prop_chr: CharacteristicId,
-    crt_chr: CharacteristicId,
-    mod_chr: CharacteristicId,
+    crt_chr: Option<CharacteristicId>,
+    mod_chr: Option<CharacteristicId>,
 }
 
 impl OtsClient {
     /// Create new client instance
     pub async fn new(session: &BluetoothSession, device_id: &DeviceId) -> Result<Self> {
         let ots_srv = session
-            .get_service_by_uuid(&device_id, ids::service::object_transfer)
+            .get_service_by_uuid(device_id, ids::service::object_transfer)
             .await?;
         log::debug!("Service: {ots_srv:#?}");
 
@@ -109,9 +146,9 @@ impl OtsClient {
             .await?;
         log::trace!("Feature Raw: {ots_feature_val:?}");
 
-        let oacp_feat = *bytemuck::from_bytes(&ots_feature_val[0..4]);
-        let olcp_feat = *bytemuck::from_bytes(&ots_feature_val[4..8]);
-        log::info!("OTS Feature: {oacp_feat:?} {olcp_feat:?}");
+        let action_features = *bytemuck::from_bytes(&ots_feature_val[0..4]);
+        let list_features = *bytemuck::from_bytes(&ots_feature_val[4..8]);
+        log::info!("OTS Feature: {action_features:?} {list_features:?}");
 
         let oacp_chr = session
             .get_characteristic_by_uuid(
@@ -124,15 +161,31 @@ impl OtsClient {
 
         let olcp_chr = session
             .get_characteristic_by_uuid(&ots_srv.id, ids::characteristic::object_list_control_point)
-            .await?;
+            .await
+            .map(Some)
+            .or_else(|error| {
+                if matches!(error, BluetoothError::UuidNotFound { .. }) {
+                    Ok(None)
+                } else {
+                    Err(error)
+                }
+            })?;
         log::debug!("OLCP Char: {olcp_chr:#?}");
-        let olcp_chr = olcp_chr.id;
+        let olcp_chr = olcp_chr.map(|chr| chr.id);
 
         let id_chr = session
             .get_characteristic_by_uuid(&ots_srv.id, ids::characteristic::object_id)
-            .await?;
+            .await
+            .map(Some)
+            .or_else(|error| {
+                if matches!(error, BluetoothError::UuidNotFound { .. }) {
+                    Ok(None)
+                } else {
+                    Err(error)
+                }
+            })?;
         log::debug!("Id Char: {id_chr:#?}");
-        let id_chr = id_chr.id;
+        let id_chr = id_chr.map(|chr| chr.id);
 
         let name_chr = session
             .get_characteristic_by_uuid(&ots_srv.id, ids::characteristic::object_name)
@@ -160,15 +213,31 @@ impl OtsClient {
 
         let crt_chr = session
             .get_characteristic_by_uuid(&ots_srv.id, ids::characteristic::object_first_created)
-            .await?;
+            .await
+            .map(Some)
+            .or_else(|error| {
+                if matches!(error, BluetoothError::UuidNotFound { .. }) {
+                    Ok(None)
+                } else {
+                    Err(error)
+                }
+            })?;
         log::debug!("Crt Char: {crt_chr:#?}");
-        let crt_chr = crt_chr.id;
+        let crt_chr = crt_chr.map(|chr| chr.id);
 
         let mod_chr = session
             .get_characteristic_by_uuid(&ots_srv.id, ids::characteristic::object_last_modified)
-            .await?;
+            .await
+            .map(Some)
+            .or_else(|error| {
+                if matches!(error, BluetoothError::UuidNotFound { .. }) {
+                    Ok(None)
+                } else {
+                    Err(error)
+                }
+            })?;
         log::debug!("Mod Char: {mod_chr:#?}");
-        let mod_chr = mod_chr.id;
+        let mod_chr = mod_chr.map(|chr| chr.id);
 
         let mut adapter_and_device_info = None;
         for adapter_info in session.get_adapters().await? {
@@ -176,14 +245,12 @@ impl OtsClient {
                 .get_devices_on_adapter(&adapter_info.id)
                 .await?
                 .into_iter()
-                .filter(|device_info| &device_info.id == device_id)
-                .next()
+                .find(|device_info| &device_info.id == device_id)
             {
                 adapter_and_device_info = Some((adapter_info, device_info));
             }
         }
-        let (adapter_info, device_info) = adapter_and_device_info
-            .ok_or_else(|| Error::NotFound)?;
+        let (adapter_info, device_info) = adapter_and_device_info.ok_or_else(|| Error::NotFound)?;
 
         let adapter_addr =
             SocketAddr::new_le_dyn_start(adapter_info.mac_address, adapter_info.address_type);
@@ -196,8 +263,8 @@ impl OtsClient {
             device_id: device_id.clone(),
             adapter_addr,
             device_addr,
-            oacp_feat,
-            olcp_feat,
+            action_features,
+            list_features,
             oacp_chr,
             olcp_chr,
             id_chr,
@@ -211,19 +278,23 @@ impl OtsClient {
     }
 
     /// Get object action feature flags
-    pub fn action_feature(&self) -> &ActionFeature {
-        &self.oacp_feat
+    pub fn action_features(&self) -> &ActionFeature {
+        &self.action_features
     }
 
     /// Get object list feature flags
-    pub fn list_feature(&self) -> &ListFeature {
-        &self.olcp_feat
+    pub fn list_features(&self) -> &ListFeature {
+        &self.list_features
     }
 
     /// Get current object identifier
-    pub async fn id(&self) -> Result<u64> {
-        let raw = self.session.read_characteristic_value(&self.id_chr).await?;
-        Ok(Ule48::try_from(raw.as_ref())?.into())
+    pub async fn id(&self) -> Result<Option<u64>> {
+        if let Some(chr) = &self.id_chr {
+            let raw = self.session.read_characteristic_value(chr).await?;
+            Ok(Some(Ule48::try_from(raw.as_ref())?.into()))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Get current object name
@@ -257,31 +328,33 @@ impl OtsClient {
         })
     }
 
+    /// Get first created time for selected object
+    pub async fn first_created(&self) -> Result<Option<DateTime>> {
+        if let Some(chr) = &self.crt_chr {
+            let raw = self.session.read_characteristic_value(chr).await?;
+            DateTime::try_from(raw.as_slice()).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get last modified time for selected object
+    pub async fn last_modified(&self) -> Result<Option<DateTime>> {
+        if let Some(chr) = &self.mod_chr {
+            let raw = self.session.read_characteristic_value(chr).await?;
+            DateTime::try_from(raw.as_slice()).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Get current object properties
-    pub async fn props(&self) -> Result<Property> {
+    pub async fn properties(&self) -> Result<Property> {
         let raw = self
             .session
             .read_characteristic_value(&self.prop_chr)
             .await?;
         Property::try_from(raw.as_ref())
-    }
-
-    /// Get first created time for selected object
-    pub async fn created(&self) -> Result<DateTime> {
-        let raw = self
-            .session
-            .read_characteristic_value(&self.crt_chr)
-            .await?;
-        DateTime::try_from(raw.as_slice())
-    }
-
-    /// Get last modified time for selected object
-    pub async fn modified(&self) -> Result<DateTime> {
-        let raw = self
-            .session
-            .read_characteristic_value(&self.mod_chr)
-            .await?;
-        DateTime::try_from(raw.as_slice())
     }
 
     /// Get current object metadata
@@ -294,9 +367,9 @@ impl OtsClient {
         } else {
             (None, None)
         };
-        let first_created = None; // TODO
-        let last_modified = None; // TODO
-        let properties = self.props().await.unwrap_or_default();
+        let first_created = self.first_created().await?;
+        let last_modified = self.last_modified().await?;
+        let properties = self.properties().await.unwrap_or_default();
 
         Ok(Metadata {
             id,
@@ -308,6 +381,39 @@ impl OtsClient {
             last_modified,
             properties,
         })
+    }
+
+    /// Select previous object
+    ///
+    /// Returns `false` if current object is first.
+    pub async fn previous(&self) -> Result<bool> {
+        match self.do_previous().await {
+            Ok(_) => Ok(true),
+            Err(Error::ListError(ListRc::OutOfBounds)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Select next object
+    ///
+    /// Returns `false` if current object is last.
+    pub async fn next(&self) -> Result<bool> {
+        match self.do_next().await {
+            Ok(_) => Ok(true),
+            Err(Error::ListError(ListRc::OutOfBounds)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Select object by identifier
+    ///
+    /// Returns `false` if object nor found.
+    pub async fn go_to(&self, id: u64) -> Result<bool> {
+        match self.do_go_to(id).await {
+            Ok(_) => Ok(true),
+            Err(Error::ListError(ListRc::ObjectIdNotFound)) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     async fn socket(&self) -> Result<Stream> {
@@ -351,7 +457,10 @@ impl OtsClient {
         };
 
         let mut buffer = Vec::with_capacity(length);
-        unsafe { buffer.set_len(length) };
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            buffer.set_len(length)
+        };
 
         let mut stm = self.read_base(offset, length).await?;
 
@@ -437,16 +546,6 @@ impl OtsClient {
         Ok(stm)
     }
 
-    async fn oacp_op(&self, req: &OacpReq) -> Result<OacpRes> {
-        let res = self.request(&self.oacp_chr, req).await?;
-        res.as_slice().try_into()
-    }
-
-    async fn olcp_op(&self, req: &OlcpReq) -> Result<OlcpRes> {
-        let res = self.request(&self.olcp_chr, req).await?;
-        res.as_slice().try_into()
-    }
-
     async fn request(&self, chr: &CharacteristicId, req: impl Into<Vec<u8>>) -> Result<Vec<u8>> {
         self.session.start_notify(chr).await?;
 
@@ -479,12 +578,9 @@ impl OtsClient {
         let req = req.into();
         log::trace!("Req: {req:?}");
 
-        self.session.write_characteristic_value(&chr, req).await?;
+        self.session.write_characteristic_value(chr, req).await?;
 
-        let res = resps
-            .next()
-            .await
-            .ok_or_else(|| Error::NoResponse)?;
+        let res = resps.next().await.ok_or_else(|| Error::NoResponse)?;
         {
             log::trace!("Res: {res:?}");
         }
@@ -496,14 +592,24 @@ impl OtsClient {
 }
 
 macro_rules! impl_fns {
-    ($($f:ident: $q:ident => $r:ident {
-        $($vis:vis $fn:ident: $qn:ident $({ $($qa:ident: $qt:ty),* })* => $rn:ident $({ $($ra:ident: $rt:ty),* })*,)*
+    ($($req_func:ident: $req_type:ident => $res_type:ident [ $char_field:ident $(: $char_kind:ident)*, $feat_field:ident: $feat_type:ident ] {
+        $($(#[$($meta:meta)*])*
+          $vis:vis $func:ident: $req_name:ident $({ $($req_arg_name:ident: $req_arg_type:ty),* })* => $res_name:ident $({ $($res_arg_name:ident: $res_arg_type:ty),* })* $([ $feat_name:ident ])*,)*
     })*) => {
         $(
+            async fn $req_func(&self, req: &$req_type) -> Result<$res_type> {
+                let res = self.request(impl_fns!(# self.$char_field $(: $char_kind)*), req).await?;
+                res.as_slice().try_into()
+            }
+
             $(
-                $vis async fn $fn(&self $($(, $qa: $qt)*)*) -> Result<impl_fns!(@ $($($rt)*)*)> {
-                    if let $r::$rn $({ $($ra),* })* = self.$f(&$q::$qn $({ $($qa),* })*).await? {
-                        Ok(impl_fns!(@ $($($ra)*)*))
+                $(#[$($meta)*])*
+                $vis async fn $func(&self $($(, $req_arg_name: $req_arg_type)*)*) -> Result<impl_fns!(@ $($($res_arg_type)*)*)> {
+                    $(if !self.$feat_field.contains($feat_type::$feat_name) {
+                        return Err(Error::NotSupported);
+                    })*
+                    if let $res_type::$res_name $({ $($res_arg_name),* })* = self.$req_func(&$req_type::$req_name $({ $($req_arg_name),* })*).await? {
+                        Ok(impl_fns!(@ $($($res_arg_name)*)*))
                     } else {
                         Err(Error::BadResponse)
                     }
@@ -512,39 +618,57 @@ macro_rules! impl_fns {
         )*
     };
 
-    (@ $i:ident) => {
-        $i
+    (@ $id:ident) => {
+        $id
     };
 
-    (@ $t:ty) => {
-        $t
+    (@ $type:ty) => {
+        $type
     };
 
     (@ ) => {
         ()
     };
+
+    (# $self:ident . $char_field:ident) => {
+        &$self.$char_field
+    };
+
+    (# $self:ident . $char_field:ident: Option) => {
+        $self.$char_field.as_ref().ok_or_else(|| Error::NotSupported)?
+    };
 }
 
 impl OtsClient {
     impl_fns! {
-        oacp_op: OacpReq => OacpRes {
-            pub create: Create { size: usize, type_: Uuid } => None,
-            pub delete: Delete => None,
-            pub check_sum: CheckSum { offset: usize, length: usize } => CheckSum { value: u32 },
-            pub execute: Execute { param: Vec<u8> } => Execute { param: Vec<u8> },
-            do_read: Read { offset: usize, length: usize } => None,
-            do_write: Write { offset: usize, length: usize, mode: WriteMode } => None,
-            pub abort: Abort => None,
+        action_request: ActionReq => ActionRes [oacp_chr, action_features: ActionFeature] {
+            /// Create new object
+            pub create: Create { size: usize, type_: Uuid } => None [Create],
+            /// Delete selected object
+            pub delete: Delete => None [Delete],
+            /// Calculate checksum using selected object data
+            pub check_sum: CheckSum { offset: usize, length: usize } => CheckSum { value: u32 } [CheckSum],
+            /// Execute selected object
+            pub execute: Execute { param: Vec<u8> } => Execute { param: Vec<u8> } [Execute],
+            do_read: Read { offset: usize, length: usize } => None [Read],
+            do_write: Write { offset: usize, length: usize, mode: WriteMode } => None [Write],
+            /// Abort operation
+            pub abort: Abort => None [Abort],
         }
-        olcp_op: OlcpReq => OlcpRes {
+        list_request: ListReq => ListRes [olcp_chr: Option, list_features: ListFeature] {
+            /// Select first object in a list
             pub first: First => None,
+            /// Select last object in a list
             pub last: Last => None,
-            pub previous: Previous => None,
-            pub next: Next => None,
-            pub go_to: GoTo { id: u64 } => None,
-            pub order: Order { order: SortOrder } => None,
-            pub number_of: NumberOf => NumberOf { count: u32 },
-            pub clear_mark: ClearMark => None,
+            do_previous: Previous => None,
+            do_next: Next => None,
+            do_go_to: GoTo { id: u64 } => None [GoTo],
+            /// Change objects order in a list
+            pub order: Order { order: SortOrder } => None [Order],
+            /// Get number of objects in a list
+            pub number_of: NumberOf => NumberOf { count: u32 } [NumberOf],
+            /// Clear objects mark
+            pub clear_mark: ClearMark => None [ClearMark],
         }
     }
 }

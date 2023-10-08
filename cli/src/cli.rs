@@ -34,6 +34,10 @@ fn mac_or_name(val: &str) -> Result<Either<MacAddress, String>, String> {
 
 #[derive(Subcommand, Debug)]
 pub enum Action {
+    /// Get service info
+    #[command(alias = "i")]
+    Info(InfoArgs),
+
     /// Get list of objects
     #[command(alias = "l")]
     List(ListArgs),
@@ -47,9 +51,24 @@ pub enum Action {
     Write(WriteArgs),
 }
 
-/// Object list flags
+/// Service info args
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+pub struct InfoArgs {
+    /// Show object action features
+    #[arg(short, long)]
+    pub action: bool,
+
+    /// Show object list features
+    #[arg(short, long)]
+    pub list: bool,
+
+    /// Show all features
+    #[arg(short, long)]
+    pub full: bool,
+}
+
+/// Object list args
+#[derive(Parser, Debug)]
 pub struct ListArgs {
     /// Show object ids
     #[arg(short, long)]
@@ -75,6 +94,18 @@ pub struct ListArgs {
     #[arg(short, long)]
     pub size: bool,
 
+    /// Show first created time
+    #[arg(short = 'C', long)]
+    pub crt_time: bool,
+
+    /// Show last modified time
+    #[arg(short = 'M', long)]
+    pub mod_time: bool,
+
+    /// Show created and modified time
+    #[arg(short = 'T', long)]
+    pub time: bool,
+
     /// Show object properties
     #[arg(short, long)]
     pub props: bool,
@@ -82,28 +113,44 @@ pub struct ListArgs {
     /// Show full metadata
     #[arg(short, long)]
     pub full: bool,
+
+    /// Use directory object
+    #[arg(short, long)]
+    pub dir: bool,
 }
 
-macro_rules! list_flags {
-    ( $( $name:ident: $($flag:ident)*; )* ) => {
-        impl ListArgs {
-            $(
-                pub fn $name(&self) -> bool {
-                    false $(|| self.$flag)*
-                }
-            )*
-        }
+macro_rules! arg_flags {
+    ( $($type:ident { $( $name:ident: $($flag:ident)*; )* })* ) => {
+        $(
+            impl $type {
+                $(
+                    pub fn $name(&self) -> bool {
+                        false $(|| self.$flag)*
+                    }
+                )*
+            }
+        )*
     };
 }
 
-list_flags! {
-    id: id full;
-    name: name full;
-    type_: type_ full;
-    cur_size: cur_size size full;
-    alloc_size: alloc_size size full;
-    any_size: cur_size alloc_size size full;
-    props: props full;
+arg_flags! {
+    InfoArgs {
+        action: action full;
+        list: list full;
+    }
+
+    ListArgs {
+        id: id full;
+        name: name full;
+        type_: type_ full;
+        cur_size: cur_size size full;
+        alloc_size: alloc_size size full;
+        any_size: cur_size alloc_size size full;
+        crt_time: crt_time time;
+        mod_time: mod_time time;
+        any_time: crt_time mod_time time;
+        props: props full;
+    }
 }
 
 /// Object selection

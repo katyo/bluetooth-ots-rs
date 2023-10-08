@@ -15,6 +15,21 @@ thiserror = "1"
 [dependencies.log]
 version = "0.4"
 
+[dependencies.time]
+version = "0.3"
+default-features = false
+optional = true
+
+[dependencies.chrono]
+version = "0.4"
+default-features = false
+optional = true
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+optional = true
+
 [dependencies.futures]
 version = "0.3"
 
@@ -33,3 +48,8 @@ version = "0.7"
 version = "1"
 default-features = false
 features = ["time", "io-util"]
+
+[features]
+default = []
+serde = ["dep:serde", "bitflags/serde", "uuid/serde"]
+all = ["serde", "time", "chrono"]

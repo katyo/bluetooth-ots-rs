@@ -11,28 +11,44 @@ use std::{
 
 pub use socket2::Type as SocketType;
 
+/// L2CAP socket address
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct L2capSockAddr {
+    /// MAC address
     pub addr: MacAddress,
+    /// Address type
     pub type_: AddressType,
+    /// PSM
     pub psm: u16,
+    /// CID
     pub cid: u16,
 }
 
 #[derive(Clone, Copy)]
 #[repr(i32)]
-enum BTPROTO {
-    L2CAP = 0,
-    RFCOMM = 3,
+#[non_exhaustive]
+enum BtProto {
+    L2Cap = 0,
 }
 
-const PSM_L2CAP_LE_CID_OTS: u16 = 0x25;
-const PSM_L2CAP_LE_DYN_START: u16 = 0x80;
+#[derive(Clone, Copy)]
+#[repr(u16)]
+#[non_exhaustive]
+enum Psm {
+    L2CapLeCidOts = 0x25,
+    L2CapLeDynStart = 0x80,
+}
 
-const BT_SNDMTU: i32 = 12;
-const BT_RCVMTU: i32 = 13;
+#[derive(Clone, Copy)]
+#[repr(i32)]
+#[non_exhaustive]
+enum SockOpt {
+    BtSndMtu = 12,
+    BtRcvMtu = 13,
+}
 
 impl L2capSockAddr {
+    /// Create L2CAP socket address
     pub fn new(addr: MacAddress, type_: AddressType, psm: u16) -> Self {
         Self {
             addr,
@@ -43,11 +59,11 @@ impl L2capSockAddr {
     }
 
     pub fn new_le_cid_ots(mac_address: MacAddress, address_type: AddressType) -> L2capSockAddr {
-        Self::new(mac_address, address_type, PSM_L2CAP_LE_CID_OTS)
+        Self::new(mac_address, address_type, Psm::L2CapLeCidOts as _)
     }
 
     pub fn new_le_dyn_start(mac_address: MacAddress, address_type: AddressType) -> L2capSockAddr {
-        Self::new(mac_address, address_type, PSM_L2CAP_LE_DYN_START)
+        Self::new(mac_address, address_type, Psm::L2CapLeDynStart as _)
     }
 }
 
@@ -170,11 +186,16 @@ pub const BT_SECURITY: i32 = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(u8)]
 pub enum SecurityLevel {
+    /// SPD
     Sdp = 0,
+    /// Low (default)
     #[default]
     Low = 1,
+    /// Medium
     Medium = 2,
+    /// High
     High = 3,
+    /// FIPS
     Fips = 4,
 }
 
@@ -187,7 +208,7 @@ impl L2capSocket {
         let inner = socket2::Socket::new(
             libc::AF_BLUETOOTH.into(),
             type_,
-            Some((BTPROTO::L2CAP as i32).into()),
+            Some((BtProto::L2Cap as i32).into()),
         )?;
         Ok(Self { inner })
     }
@@ -235,21 +256,31 @@ impl L2capSocket {
     }
 
     pub fn recv_mtu(&self) -> Result<usize> {
-        Ok(getsockopt::<u16>(&self.inner, libc::SOL_BLUETOOTH, BT_RCVMTU)? as _)
+        Ok(getsockopt::<u16>(&self.inner, libc::SOL_BLUETOOTH, SockOpt::BtRcvMtu as _)? as _)
     }
 
     pub fn set_recv_mtu(&self, mtu: usize) -> Result<()> {
         let mtu = mtu as u16;
-        setsockopt(&self.inner, libc::SOL_BLUETOOTH, BT_RCVMTU, &mtu)
+        setsockopt(
+            &self.inner,
+            libc::SOL_BLUETOOTH,
+            SockOpt::BtRcvMtu as _,
+            &mtu,
+        )
     }
 
     pub fn send_mtu(&self) -> Result<usize> {
-        Ok(getsockopt::<u16>(&self.inner, libc::SOL_BLUETOOTH, BT_SNDMTU)? as _)
+        Ok(getsockopt::<u16>(&self.inner, libc::SOL_BLUETOOTH, SockOpt::BtSndMtu as _)? as _)
     }
 
     pub fn set_send_mtu(&self, mtu: usize) -> Result<()> {
         let mtu = mtu as u16;
-        setsockopt(&self.inner, libc::SOL_BLUETOOTH, BT_SNDMTU, &mtu)
+        setsockopt(
+            &self.inner,
+            libc::SOL_BLUETOOTH,
+            SockOpt::BtSndMtu as _,
+            &mtu,
+        )
     }
 }
 
