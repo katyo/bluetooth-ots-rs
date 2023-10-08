@@ -2,9 +2,8 @@ mod ids;
 mod l2cap;
 mod types;
 
-use anyhow::Result;
 use bluez_async::{
-    BluetoothEvent, BluetoothSession, CharacteristicEvent, CharacteristicId, DeviceId,
+    BluetoothEvent, BluetoothSession, CharacteristicEvent, CharacteristicId, DeviceId, BluetoothError,
 };
 use bytemuck::{Pod, Zeroable};
 use futures::stream::StreamExt;
@@ -13,10 +12,54 @@ use uuid::Uuid;
 use l2cap::{
     L2capSockAddr as SocketAddr, L2capSocket as Socket, L2capStream as Stream, SocketType,
 };
-use types::{OacpReq, OacpRes, OlcpReq, OlcpRes, Ule48};
+use types::{OacpReq, OacpRes, OlcpReq, OlcpRes, Ule48, OpType};
 
 pub use l2cap::{Security, SecurityLevel};
-pub use types::{ActionFeature, ListFeature, Metadata, Property, SortOrder, WriteMode};
+pub use types::{ActionFeature, ListFeature, Metadata, Property, SortOrder, WriteMode, OlcpRc, OacpRc, DateTime};
+
+/// OTS client result
+pub type Result<T> = core::result::Result<T, Error>;
+
+/// OTS client error
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("Input/Output Error: {0}")]
+    IoError(#[from] std::io::Error),
+    #[error("Bluetooth error: {0}")]
+    BtError(#[from] BluetoothError),
+    #[error("Invalid UTF8 string: {0}")]
+    Utf8Error(#[from] core::str::Utf8Error),
+    #[error("Invalid UUID: {0}")]
+    UuidError(#[from] uuid::Error),
+    #[error("Not found")]
+    NotFound,
+    #[error("No response")]
+    NoResponse,
+    #[error("Invalid response")]
+    BadResponse,
+    #[error("Invalid UUID size: {0}")]
+    BadUuidSize(usize),
+    #[error("Connection timeout")]
+    Timeout,
+    #[error("Object list error: {0:?}")]
+    ListError(#[from] OlcpRc),
+    #[error("Object action error: {0:?}")]
+    ActionError(#[from] OacpRc),
+    #[error("Invalid properties: {0:08x?}")]
+    InvalidProps(u32),
+    #[error("Invalid directory flags: {0:02x?}")]
+    InvalidDirFlags(u8),
+    #[error("Not enough data ({actual} < {needed})")]
+    NotEnoughData { actual: usize, needed: usize },
+    #[error("Invalid opcode for {type_}: {code:02x?}")]
+    BadOpCode { type_: OpType, code: u8 },
+}
+
+impl From<std::string::FromUtf8Error> for Error {
+    fn from(err: std::string::FromUtf8Error) -> Self {
+        Self::Utf8Error(err.utf8_error())
+    }
+}
 
 /// Object sizes (current and allocated)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable)]
@@ -41,6 +84,8 @@ pub struct OtsClient {
     type_chr: CharacteristicId,
     size_chr: CharacteristicId,
     prop_chr: CharacteristicId,
+    crt_chr: CharacteristicId,
+    mod_chr: CharacteristicId,
 }
 
 impl OtsClient {
@@ -113,6 +158,18 @@ impl OtsClient {
         log::debug!("Prop Char: {prop_chr:#?}");
         let prop_chr = prop_chr.id;
 
+        let crt_chr = session
+            .get_characteristic_by_uuid(&ots_srv.id, ids::characteristic::object_first_created)
+            .await?;
+        log::debug!("Crt Char: {crt_chr:#?}");
+        let crt_chr = crt_chr.id;
+
+        let mod_chr = session
+            .get_characteristic_by_uuid(&ots_srv.id, ids::characteristic::object_last_modified)
+            .await?;
+        log::debug!("Mod Char: {mod_chr:#?}");
+        let mod_chr = mod_chr.id;
+
         let mut adapter_and_device_info = None;
         for adapter_info in session.get_adapters().await? {
             if let Some(device_info) = session
@@ -126,7 +183,7 @@ impl OtsClient {
             }
         }
         let (adapter_info, device_info) = adapter_and_device_info
-            .ok_or_else(|| anyhow::anyhow!("Unable to find device adapter pair"))?;
+            .ok_or_else(|| Error::NotFound)?;
 
         let adapter_addr =
             SocketAddr::new_le_dyn_start(adapter_info.mac_address, adapter_info.address_type);
@@ -148,6 +205,8 @@ impl OtsClient {
             type_chr,
             size_chr,
             prop_chr,
+            crt_chr,
+            mod_chr,
         })
     }
 
@@ -207,6 +266,24 @@ impl OtsClient {
         Property::try_from(raw.as_ref())
     }
 
+    /// Get first created time for selected object
+    pub async fn created(&self) -> Result<DateTime> {
+        let raw = self
+            .session
+            .read_characteristic_value(&self.crt_chr)
+            .await?;
+        DateTime::try_from(raw.as_slice())
+    }
+
+    /// Get last modified time for selected object
+    pub async fn modified(&self) -> Result<DateTime> {
+        let raw = self
+            .session
+            .read_characteristic_value(&self.mod_chr)
+            .await?;
+        DateTime::try_from(raw.as_slice())
+    }
+
     /// Get current object metadata
     pub async fn metadata(&self) -> Result<Metadata> {
         let id = self.id().await?;
@@ -248,7 +325,7 @@ impl OtsClient {
             socket.connect(&self.device_addr),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("Connection timedout"))??;
+        .map_err(|_| Error::Timeout)??;
         log::debug!(
             "Local/Peer Address: {:?}/{:?}",
             stream.local_addr()?,
@@ -407,7 +484,7 @@ impl OtsClient {
         let res = resps
             .next()
             .await
-            .ok_or_else(|| anyhow::anyhow!("No response"))?;
+            .ok_or_else(|| Error::NoResponse)?;
         {
             log::trace!("Res: {res:?}");
         }
@@ -428,7 +505,7 @@ macro_rules! impl_fns {
                     if let $r::$rn $({ $($ra),* })* = self.$f(&$q::$qn $({ $($qa),* })*).await? {
                         Ok(impl_fns!(@ $($($ra)*)*))
                     } else {
-                        Err(anyhow::anyhow!("Unexpected response"))
+                        Err(Error::BadResponse)
                     }
                 }
             )*

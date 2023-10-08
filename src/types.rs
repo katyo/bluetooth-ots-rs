@@ -1,6 +1,7 @@
 use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
 use uuid::Uuid;
+use crate::{Error, Result};
 
 bitflags! {
     /// Object action feature flags
@@ -64,28 +65,29 @@ bitflags! {
     }
 }
 
-pub fn uuid_from_raw(raw: &[u8]) -> Result<Uuid, anyhow::Error> {
+pub fn uuid_from_raw(raw: &[u8]) -> Result<Uuid> {
     Ok(match raw.len() {
         2 => bluez_async::uuid_from_u16(u16::from_le_bytes(*raw.split_array_ref_().0)),
         4 => bluez_async::uuid_from_u32(u32::from_le_bytes(*raw.split_array_ref_().0)),
         16 => Uuid::from_slice(&raw)?,
-        len => return Err(anyhow::anyhow!("Unexpedted type UUID length: {len}")),
+        len => return Err(Error::BadUuidSize(len)),
     })
 }
 
 impl TryFrom<[u8; 4]> for Property {
-    type Error = anyhow::Error;
-    fn try_from(raw: [u8; 4]) -> Result<Self, Self::Error> {
-        Self::from_bits(u32::from_le_bytes(raw))
-            .ok_or_else(|| anyhow::anyhow!("Invalid properties"))
+    type Error = Error;
+    fn try_from(raw: [u8; 4]) -> Result<Self> {
+        let val = u32::from_le_bytes(raw);
+        Self::from_bits(val)
+            .ok_or_else(|| Error::InvalidProps(val))
     }
 }
 
 impl TryFrom<&[u8]> for Property {
-    type Error = anyhow::Error;
-    fn try_from(raw: &[u8]) -> Result<Self, Self::Error> {
+    type Error = Error;
+    fn try_from(raw: &[u8]) -> Result<Self> {
         if raw.len() < 4 {
-            anyhow::bail!("Not enough data for properties");
+            return Err(Error::NotEnoughData { actual: raw.len(), needed: 4 });
         }
         let (raw, _) = raw.split_array_ref_();
         Self::try_from(*raw)
@@ -100,10 +102,10 @@ pub struct Ule48 {
 }
 
 impl TryFrom<&[u8]> for Ule48 {
-    type Error = anyhow::Error;
-    fn try_from(raw: &[u8]) -> Result<Self, Self::Error> {
+    type Error = Error;
+    fn try_from(raw: &[u8]) -> Result<Self> {
         if raw.len() < 6 {
-            anyhow::bail!("Not enough data for U48");
+            return Err(Error::NotEnoughData { actual: raw.len(), needed: 6 });
         }
         let (raw, _) = raw.split_array_ref_();
         Ok(Self::from(*raw))
@@ -146,6 +148,27 @@ pub struct Sizes {
 
 macro_rules! impl_bc {
     ($( $(#[$($tm:meta)*])* $tn:ident (|$raw:ident| $cond:expr) { $($vn:ident = $vc:literal,)* } )*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[repr(u8)]
+        pub enum OpType {
+            $($tn,)*
+        }
+
+        impl AsRef<str> for OpType {
+            fn as_ref(&self) -> &str {
+                use OpType::*;
+                match self {
+                    $($tn => stringify!($tn),)*
+                }
+            }
+        }
+
+        impl core::fmt::Display for OpType {
+            fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+                f.write_str(self.as_ref())
+            }
+        }
+
         $(
             $(#[$($tm)*])*
             #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -170,14 +193,14 @@ macro_rules! impl_bc {
             }
 
             impl TryFrom<u8> for $tn {
-                type Error = anyhow::Error;
+                type Error = Error;
 
-                fn try_from($raw: u8) -> Result<Self, Self::Error> {
+                fn try_from($raw: u8) -> Result<Self> {
                     use $tn::*;
                     if $cond {
                         Ok(unsafe { *(&$raw as *const _ as *const _) })
                     } else {
-                        Err(anyhow::anyhow!(concat!("Invalid ", stringify!($tn), " code: {raw:02x?}")))
+                        Err(Error::BadOpCode { type_: OpType::$tn, code: $raw })
                     }
                 }
             }
@@ -253,6 +276,9 @@ impl_bc! {
     }
 }
 
+impl std::error::Error for OlcpRc {}
+impl std::error::Error for OacpRc {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OlcpReq {
     First,
@@ -297,23 +323,23 @@ pub enum OlcpRes {
 }
 
 impl TryFrom<&[u8]> for OlcpRes {
-    type Error = anyhow::Error;
+    type Error = Error;
 
-    fn try_from(raw: &[u8]) -> Result<Self, Self::Error> {
+    fn try_from(raw: &[u8]) -> Result<Self> {
         use OlcpRes::*;
 
         if raw.len() < 3 {
-            anyhow::bail!("Not enought list response data");
+            return Err(Error::NotEnoughData { actual: raw.len(), needed: 3 });
         }
 
         if !matches!(raw[0].try_into()?, OlcpOp::Response) {
-            return Err(anyhow::anyhow!("Isn't a response"));
+            return Err(Error::BadResponse);
         }
 
         match raw[2].try_into()? {
             OlcpRc::Success => Ok(if matches!(raw[1].try_into()?, OlcpOp::NumberOf) {
                 if raw.len() < 7 {
-                    anyhow::bail!("Not enought number data");
+                    return Err(Error::NotEnoughData { actual: raw.len(), needed: 77 });
                 }
                 NumberOf {
                     count: u32::from_le_bytes(*raw[3..].as_ref().split_array_ref_().0),
@@ -321,7 +347,7 @@ impl TryFrom<&[u8]> for OlcpRes {
             } else {
                 None
             }),
-            rc => Err(anyhow::anyhow!("Operation error: {rc}")),
+            rc => Err(Error::ListError(rc)),
         }
     }
 }
@@ -402,24 +428,24 @@ pub enum OacpRes {
 }
 
 impl TryFrom<&[u8]> for OacpRes {
-    type Error = anyhow::Error;
+    type Error = Error;
 
-    fn try_from(raw: &[u8]) -> Result<Self, Self::Error> {
+    fn try_from(raw: &[u8]) -> Result<Self> {
         use OacpRes::*;
 
         if raw.len() < 3 {
-            anyhow::bail!("Not enought action response data");
+            return Err(Error::NotEnoughData { actual: raw.len(), needed: 3 })
         }
 
         if !matches!(raw[0].try_into()?, OacpOp::Response) {
-            return Err(anyhow::anyhow!("Isn't a response"));
+            return Err(Error::BadResponse);
         }
 
         match raw[2].try_into()? {
             OacpRc::Success => Ok(match raw[1].try_into()? {
                 OacpOp::CheckSum => {
                     if raw.len() < 7 {
-                        anyhow::bail!("Not enought checksum data");
+                        return Err(Error::NotEnoughData { actual: raw.len(), needed: 7 });
                     }
                     CheckSum {
                         value: u32::from_le_bytes(*raw[3..].as_ref().split_array_ref_().0),
@@ -430,8 +456,44 @@ impl TryFrom<&[u8]> for OacpRes {
                 },
                 _ => None,
             }),
-            rc => Err(anyhow::anyhow!("Operation error: {rc}")),
+            rc => Err(Error::ActionError(rc)),
         }
+    }
+}
+
+/// Object date and time
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(C)]
+pub struct DateTime {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+impl From<&[u8; 7]> for DateTime {
+    fn from(raw: &[u8; 7]) -> Self {
+        Self {
+            year: u16::from_le_bytes([raw[0], raw[1]]),
+            month: raw[2],
+            day: raw[3],
+            hour: raw[4],
+            minute: raw[5],
+            second: raw[6],
+        }
+    }
+}
+
+impl TryFrom<&[u8]> for DateTime {
+    type Error = Error;
+    fn try_from(raw: &[u8]) -> Result<Self> {
+        if raw.len() < 7 {
+            return Err(Error::NotEnoughData { actual: raw.len(), needed: 7 });
+        }
+        let (dt, _) = raw.split_array_ref_();
+        Ok(Self::from(dt))
     }
 }
 
@@ -444,26 +506,23 @@ pub struct Metadata {
     pub type_: Uuid,
     pub current_size: Option<usize>,
     pub allocated_size: Option<usize>,
-    pub first_created: Option<u64>,
-    pub last_modified: Option<u64>,
+    pub first_created: Option<DateTime>,
+    pub last_modified: Option<DateTime>,
     pub properties: Property,
 }
 
 impl Metadata {
-    pub fn split_dir_entry(raw: &[u8]) -> Result<Option<(&[u8], &[u8])>, anyhow::Error> {
+    pub fn split_dir_entry(raw: &[u8]) -> Result<Option<(&[u8], &[u8])>> {
         if raw.len() == 0 {
             return Ok(None);
         }
         if raw.len() < 13 {
-            anyhow::bail!("Not enought data for record ({} < 13)", raw.len());
+            return Err(Error::NotEnoughData { actual: raw.len(), needed: 13 });
         }
         let (record_len, _) = raw.split_array_ref_();
         let record_len = u16::from_le_bytes(*record_len) as usize;
         if raw.len() < record_len {
-            anyhow::bail!(
-                "Not enought data for reading record ({} < {record_len})",
-                raw.len()
-            );
+            return Err(Error::NotEnoughData { actual: raw.len(), needed: record_len });
         }
         let (rec, rest) = raw.split_at(record_len);
         Ok(Some((&rec[2..], rest)))
@@ -471,26 +530,27 @@ impl Metadata {
 }
 
 impl TryFrom<&[u8]> for Metadata {
-    type Error = anyhow::Error;
-    fn try_from(raw: &[u8]) -> Result<Self, Self::Error> {
+    type Error = Error;
+    fn try_from(raw: &[u8]) -> Result<Self> {
         if raw.len() < 11 {
-            anyhow::bail!("Not enought data");
+            return Err(Error::NotEnoughData { actual: raw.len(), needed: 11 });
         }
         let (id, raw) = raw.split_array_ref_();
         let id: u64 = Ule48::from(*id).into();
         let (name_len, raw) = raw.split_array_ref_();
         let name_len = u8::from_le_bytes(*name_len) as usize;
         if raw.len() < name_len + 1 + 2 {
-            anyhow::bail!("Not enought data for string and flags");
+            return Err(Error::NotEnoughData { actual: raw.len(), needed: name_len + 1 + 2 });
         }
         let (name, raw) = raw.split_at(name_len);
         let name = core::str::from_utf8(name)?.into();
         let (flags, raw) = raw.split_array_ref_();
-        let flags = DirFlag::from_bits(u8::from_le_bytes(*flags))
-            .ok_or_else(|| anyhow::anyhow!("Invalid directoyy flags"))?;
+        let flags = u8::from_le_bytes(*flags);
+        let flags = DirFlag::from_bits(flags)
+            .ok_or_else(|| Error::InvalidDirFlags(flags))?;
         let (type_, raw) = if flags.contains(DirFlag::TypeUuid128) {
             if raw.len() < 16 {
-                anyhow::bail!("Not enought data for type UUID");
+                return Err(Error::NotEnoughData { actual: raw.len(), needed: 16 });
             }
             let (uuid, raw) = raw.split_array_ref_();
             (Uuid::from_bytes(*uuid), raw)
@@ -500,7 +560,7 @@ impl TryFrom<&[u8]> for Metadata {
         };
         let (current_size, raw) = if flags.contains(DirFlag::HasCurrentSize) {
             if raw.len() < 4 {
-                anyhow::bail!("Not enought data for allocated size");
+                return Err(Error::NotEnoughData { actual: raw.len(), needed: 4 });
             }
             let (size, raw) = raw.split_array_ref_();
             let size = u32::from_le_bytes(*size);
@@ -510,7 +570,7 @@ impl TryFrom<&[u8]> for Metadata {
         };
         let (allocated_size, raw) = if flags.contains(DirFlag::HasAllocatedSize) {
             if raw.len() < 4 {
-                anyhow::bail!("Not enought data for allocated size");
+                return Err(Error::NotEnoughData { actual: raw.len(), needed: 4 });
             }
             let (size, raw) = raw.split_array_ref_();
             let size = u32::from_le_bytes(*size);
@@ -520,31 +580,27 @@ impl TryFrom<&[u8]> for Metadata {
         };
         let (first_created, raw) = if flags.contains(DirFlag::HasFirstCreated) {
             if raw.len() < 7 {
-                anyhow::bail!("Not enought data for first created");
+                return Err(Error::NotEnoughData { actual: raw.len(), needed: 7 });
             }
             let (time, raw) = raw.split_array_ref_();
-            let _time: &[u8; 7] = time;
-            // TODO
-            //(Some(time), raw)
-            (None, raw)
+            let time = DateTime::from(time);
+            (Some(time), raw)
         } else {
             (None, raw)
         };
         let (last_modified, raw) = if flags.contains(DirFlag::HasFirstCreated) {
             if raw.len() < 7 {
-                anyhow::bail!("Not enought data for last modified");
+                return Err(Error::NotEnoughData { actual: raw.len(), needed: 7 });
             }
             let (time, raw) = raw.split_array_ref_();
-            let _time: &[u8; 7] = time;
-            // TODO
-            //(Some(time), raw)
-            (None, raw)
+            let time = DateTime::from(time);
+            (Some(time), raw)
         } else {
             (None, raw)
         };
         let (properties, _raw) = if flags.contains(DirFlag::HasProperties) {
             if raw.len() < 4 {
-                anyhow::bail!("Not enought data for properties");
+                return Err(Error::NotEnoughData { actual: raw.len(), needed: 4 });
             }
             let (props, raw) = raw.split_array_ref_();
             let props = Property::try_from(*props)?;

@@ -35,12 +35,15 @@ fn mac_or_name(val: &str) -> Result<Either<MacAddress, String>, String> {
 #[derive(Subcommand, Debug)]
 pub enum Action {
     /// Get list of objects
+    #[command(alias = "l")]
     List(ListArgs),
 
     /// Read object data
+    #[command(alias = "r")]
     Read(ReadArgs),
 
     /// Write object data
+    #[command(alias = "w")]
     Write(WriteArgs),
 }
 

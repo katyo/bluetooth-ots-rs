@@ -1,4 +1,3 @@
-use anyhow::Result;
 use bluez_async::BluetoothSession;
 use bluez_async_ots::{Metadata, OtsClient};
 use core::time::Duration;
@@ -9,6 +8,36 @@ mod cli;
 
 #[cfg(feature = "readline")]
 mod rl;
+
+/// OTS command result
+pub type Result<T> = core::result::Result<T, Error>;
+
+/// OTS command error
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("Input/Output Error: {0}")]
+    IoError(#[from] std::io::Error),
+    #[error("Bluetooth Error: {0}")]
+    BtError(#[from] bluez_async::BluetoothError),
+    #[error("OTS Error: {0}")]
+    OTSError(#[from] bluez_async_ots::Error),
+    #[error("Invalid UTF8 string: {0}")]
+    Utf8Error(#[from] core::str::Utf8Error),
+    #[error("No adapter found")]
+    NoAdapter,
+    #[error("No device found")]
+    NoDevice,
+    #[error("Bad hexadecimal data")]
+    HexError,
+    #[error("Need any of index, id or name to select object to read")]
+    ObjIdError,
+}
+
+impl From<std::string::FromUtf8Error> for Error {
+    fn from(err: std::string::FromUtf8Error) -> Self {
+        Self::Utf8Error(err.utf8_error())
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,7 +64,7 @@ async fn main() -> Result<()> {
                     },
                 )
                 .next()
-                .ok_or_else(|| anyhow::anyhow!("No adapter found"))?
+                .ok_or_else(|| Error::NoAdapter)?
                 .id,
         )
     } else {
@@ -70,7 +99,7 @@ async fn main() -> Result<()> {
             _ => false,
         })
         .next()
-        .ok_or_else(|| anyhow::anyhow!("No device found"))?;
+        .ok_or_else(|| Error::NoDevice)?;
     log::debug!("Device: {dev:#?}");
 
     let dev_id = dev.id.clone();
@@ -314,7 +343,7 @@ impl cli::WriteArgs {
                             half = Some(dig << 4);
                         }
                     } else {
-                        anyhow::bail!("Hexadecimal data expected");
+                        return Err(Error::HexError);
                     }
                 }
                 data
@@ -366,7 +395,7 @@ impl cli::ObjSel {
                 ots.next().await?;
             }
         } else {
-            anyhow::bail!("Need any of index, id or name to select object to read.");
+            return Err(Error::ObjIdError);
         }
         Ok(())
     }
