@@ -1,7 +1,13 @@
 [package]
 name = "ots-client"
 version = "0.1.0"
+authors = ["K. <kayo@illumium.org"]
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Bluetooth Object Transfer Service (OTS) Client command-line tool."
+repository = "https://github.com/katyo/bluez-async-ots/"
+keywords = ["ble", "bluetooth", "bluez", "ots", "object-transfer"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 hex_pp = "0.1"
