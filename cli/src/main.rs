@@ -6,9 +6,6 @@ use tokio::{io::AsyncReadExt, time::sleep};
 
 mod cli;
 
-#[cfg(feature = "readline")]
-mod rl;
-
 /// OTS command result
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -355,43 +352,29 @@ impl cli::WriteArgs {
                 tokio::fs::read(file).await?
             }
         } else {
-            #[cfg(feature = "readline")]
-            {
-                log::trace!("readline begin");
-                if let Some(data) = rl::read_hex().await? {
-                    log::trace!("readline end: {}", HexDump(&data));
-                    data
-                } else {
-                    return Ok(());
+            // read from stdin
+            let mut data = Vec::new();
+            tokio::io::stdin().read_to_end(&mut data).await?;
+            let chars = core::str::from_utf8(&data)?.chars();
+            let mut data = Vec::with_capacity(data.len() / 2);
+            let mut half = None;
+            for chr in chars {
+                if chr.is_whitespace() {
+                    // skip spaces
+                    continue;
                 }
-            }
-
-            #[cfg(not(feature = "readline"))]
-            {
-                // read from stdin
-                let mut data = Vec::new();
-                tokio::io::stdin().read_to_end(&mut data).await?;
-                let chars = core::str::from_utf8(&data)?.chars();
-                let mut data = Vec::with_capacity(data.len() / 2);
-                let mut half = None;
-                for chr in chars {
-                    if chr.is_whitespace() {
-                        // skip spaces
-                        continue;
-                    }
-                    if let Some(dig) = chr.to_digit(16) {
-                        let dig = dig as u8;
-                        if let Some(half) = half.take() {
-                            data.push(half | dig);
-                        } else {
-                            half = Some(dig << 4);
-                        }
+                if let Some(dig) = chr.to_digit(16) {
+                    let dig = dig as u8;
+                    if let Some(half) = half.take() {
+                        data.push(half | dig);
                     } else {
-                        return Err(Error::HexError);
+                        half = Some(dig << 4);
                     }
+                } else {
+                    return Err(Error::HexError);
                 }
-                data
             }
+            data
         };
 
         let data = if let Some(len) = self.range.length {
