@@ -1,5 +1,6 @@
 #![forbid(future_incompatible)]
 #![deny(bad_style, missing_docs)]
+#![doc = include_str!("../README.md")]
 
 mod ids;
 mod l2cap;
