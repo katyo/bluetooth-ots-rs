@@ -7,8 +7,8 @@ mod l2cap;
 mod types;
 
 use bluez_async::{
-    BluetoothError, BluetoothEvent, BluetoothSession, CharacteristicEvent, CharacteristicId,
-    DeviceId,
+    AdapterId, BluetoothError, BluetoothEvent, BluetoothSession, CharacteristicEvent,
+    CharacteristicId, DeviceId,
 };
 use bytemuck::{Pod, Zeroable};
 use futures::stream::StreamExt;
@@ -110,6 +110,7 @@ pub struct Sizes {
 /// Object Transfer Service (OTS) client
 pub struct OtsClient {
     session: BluetoothSession,
+    adapter_id: AdapterId,
     device_id: DeviceId,
     adapter_addr: SocketAddr,
     device_addr: SocketAddr,
@@ -129,6 +130,12 @@ pub struct OtsClient {
 impl AsRef<BluetoothSession> for OtsClient {
     fn as_ref(&self) -> &BluetoothSession {
         &self.session
+    }
+}
+
+impl AsRef<AdapterId> for OtsClient {
+    fn as_ref(&self) -> &AdapterId {
+        &self.adapter_id
     }
 }
 
@@ -285,6 +292,7 @@ impl OtsClient {
 
         Ok(Self {
             session: session.clone(),
+            adapter_id: adapter_info.id,
             device_id: device_id.clone(),
             adapter_addr,
             device_addr,
