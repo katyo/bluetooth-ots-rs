@@ -126,6 +126,30 @@ pub struct OtsClient {
     mod_chr: Option<CharacteristicId>,
 }
 
+impl AsRef<BluetoothSession> for OtsClient {
+    fn as_ref(&self) -> &BluetoothSession {
+        &self.session
+    }
+}
+
+impl AsRef<DeviceId> for OtsClient {
+    fn as_ref(&self) -> &DeviceId {
+        &self.device_id
+    }
+}
+
+impl AsRef<ActionFeature> for OtsClient {
+    fn as_ref(&self) -> &ActionFeature {
+        &self.action_features
+    }
+}
+
+impl AsRef<ListFeature> for OtsClient {
+    fn as_ref(&self) -> &ListFeature {
+        &self.list_features
+    }
+}
+
 impl OtsClient {
     /// Create new client instance
     pub async fn new(session: &BluetoothSession, device_id: &DeviceId) -> Result<Self> {
