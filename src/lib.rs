@@ -97,6 +97,15 @@ impl From<std::string::FromUtf8Error> for Error {
     }
 }
 
+/// Object Transfer Service (OTS) client configuration
+#[derive(Debug, Clone, Default)]
+pub struct ClientConfig {
+    /// Privileged mode for connections
+    ///
+    /// If `true` the L2CAP sockets will be openned in privileged mode.
+    pub privileged: bool,
+}
+
 /// Object sizes (current and allocated)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable)]
 #[repr(C)]
@@ -159,7 +168,11 @@ impl AsRef<ListFeature> for OtsClient {
 
 impl OtsClient {
     /// Create new client instance
-    pub async fn new(session: &BluetoothSession, device_id: &DeviceId) -> Result<Self> {
+    pub async fn new(
+        session: &BluetoothSession,
+        device_id: &DeviceId,
+        config: &ClientConfig,
+    ) -> Result<Self> {
         let ots_srv = session
             .get_service_by_uuid(device_id, ids::service::object_transfer)
             .await?;
@@ -284,8 +297,11 @@ impl OtsClient {
         }
         let (adapter_info, device_info) = adapter_and_device_info.ok_or_else(|| Error::NotFound)?;
 
-        let adapter_addr =
-            SocketAddr::new_le_dyn_start(adapter_info.mac_address, adapter_info.address_type);
+        let adapter_addr = if config.privileged {
+            SocketAddr::new_le_cid_ots(adapter_info.mac_address, adapter_info.address_type)
+        } else {
+            SocketAddr::new_le_dyn_start(adapter_info.mac_address, adapter_info.address_type)
+        };
 
         let device_addr =
             SocketAddr::new_le_cid_ots(device_info.mac_address, device_info.address_type);

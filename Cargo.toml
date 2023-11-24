@@ -1,6 +1,6 @@
 [package]
 name = "bluez-async-ots"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["K. <kayo@illumium.org"]
 edition = "2021"
 license = "MIT OR Apache-2.0"

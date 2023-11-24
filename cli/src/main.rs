@@ -1,5 +1,5 @@
 use bluez_async::BluetoothSession;
-use bluez_async_ots::{DirEntries, OtsClient};
+use bluez_async_ots::{ClientConfig, DirEntries, OtsClient};
 use core::time::Duration;
 use either::Either;
 use tokio::{io::AsyncReadExt, time::sleep};
@@ -43,6 +43,10 @@ async fn main() -> Result<()> {
     pretty_env_logger::init();
 
     let args = <cli::Args as clap::Parser>::parse();
+
+    let config = ClientConfig {
+        privileged: args.privileged,
+    };
 
     let (_, bs) = BluetoothSession::new().await?;
 
@@ -110,7 +114,7 @@ async fn main() -> Result<()> {
             .await?;
     }
 
-    let ots = OtsClient::new(&bs, &dev_id).await?;
+    let ots = OtsClient::new(&bs, &dev_id, &config).await?;
 
     use cli::Action::*;
     match args.action {

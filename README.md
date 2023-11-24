@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
 
     // Create OTS client using session and device id
     // Session will be cloned by client internally
-    let ots = OtsClient::new(&bs, &dev_id).await?;
+    let ots = OtsClient::new(&bs, &dev_id, &Default::default()).await?;
 
     // Now you can list objects by reading special object with zero id
 

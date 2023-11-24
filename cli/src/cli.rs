@@ -19,6 +19,10 @@ pub struct Args {
     #[arg(short, long, value_parser = mac_or_name)]
     pub device: Either<MacAddress, String>,
 
+    /// Use privileged mode for sockets
+    #[arg(short, long)]
+    pub privileged: bool,
+
     /// Client action to do
     #[command(subcommand)]
     pub action: Action,
