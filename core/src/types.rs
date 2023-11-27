@@ -1,19 +1,18 @@
 use crate::{Error, Result};
 use bitflags::bitflags;
-use bytemuck::{Pod, Zeroable};
 use uuid::Uuid;
 
 macro_rules! bitflag_types {
     ($(
         $(#[$($meta:meta)*])*
-        $type:ident: $repr:ty {
+        $type:ident: $repr:ty [$perr:ident] {
             $( $var:ident = $bit:literal $str:literal, )*
         }
     )*) => {
         bitflags! {
             $(
                 $(#[$($meta)*])*
-                #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable, Default)]
+                #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
                 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
                 #[repr(C)]
                 pub struct $type: $repr {
@@ -26,6 +25,30 @@ macro_rules! bitflag_types {
         }
 
         $(
+            impl TryFrom<[u8; core::mem::size_of::<$repr>()]> for $type {
+                type Error = Error;
+                fn try_from(raw: [u8; 4]) -> Result<Self> {
+                    let val = u32::from_le_bytes(raw);
+                    Self::from_bits(val).ok_or(Error::$perr(val))
+                }
+            }
+
+            impl TryFrom<&[u8; core::mem::size_of::<$repr>()]> for $type {
+                type Error = Error;
+                fn try_from(raw: &[u8; 4]) -> Result<Self> {
+                    (*raw).try_into()
+                }
+            }
+
+            impl TryFrom<&[u8]> for $type {
+                type Error = Error;
+                fn try_from(raw: &[u8]) -> Result<Self> {
+                    Error::check_size_exact::<Self>(raw.len())?;
+                    let (raw, _) = raw.split_array_ref_();
+                    Self::try_from(*raw)
+                }
+            }
+
             impl core::fmt::Display for $type {
                 fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
                     let mut first = true;
@@ -51,7 +74,7 @@ macro_rules! bitflag_types {
 
 bitflag_types! {
     /// Object action feature flags
-    ActionFeature: u32 {
+    ActionFeature: u32 [BadActionFeatures] {
         Create = 0 "create",
         Delete = 1 "delete",
         CheckSum = 2 "checksum",
@@ -65,7 +88,7 @@ bitflag_types! {
     }
 
     /// Object list feature flags
-    ListFeature: u32 {
+    ListFeature: u32 [BadListFeatures] {
         GoTo = 0 "goto",
         Order = 1 "order",
         NumberOf = 2 "numberof",
@@ -73,7 +96,7 @@ bitflag_types! {
     }
 
     /// Object property flags
-    Property: u32 {
+    Property: u32 [BadProperties] {
         Delete = 0 "delete",
         Execute = 1 "execute",
         Read = 2 "read",
@@ -87,7 +110,7 @@ bitflag_types! {
 
 bitflags! {
     /// Object write action mode flags
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable, Default)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
     #[repr(C)]
     pub struct WriteMode: u8 {
         /// Truncate written data
@@ -95,7 +118,7 @@ bitflags! {
     }
 
     /// Object directory flags
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable, Default)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
     #[repr(C)]
     pub struct DirFlag: u8 {
         const TypeUuid128 = 1 << 0;
@@ -108,39 +131,23 @@ bitflags! {
     }
 }
 
+const UUID_BASE: u128 = 0x00000000_0000_1000_8000_00805f9b34fb;
+
 pub fn uuid_from_raw(raw: &[u8]) -> Result<Uuid> {
     Ok(match raw.len() {
-        2 => bluez_async::uuid_from_u16(u16::from_le_bytes(*raw.split_array_ref_().0)),
-        4 => bluez_async::uuid_from_u32(u32::from_le_bytes(*raw.split_array_ref_().0)),
+        2 => Uuid::from_u128(
+            UUID_BASE | ((u16::from_le_bytes(*raw.split_array_ref_().0) as u128) << 96),
+        ),
+        4 => Uuid::from_u128(
+            UUID_BASE | ((u32::from_le_bytes(*raw.split_array_ref_().0) as u128) << 96),
+        ),
         16 => Uuid::from_slice(raw)?,
         len => return Err(Error::BadUuidSize(len)),
     })
 }
 
-impl TryFrom<[u8; 4]> for Property {
-    type Error = Error;
-    fn try_from(raw: [u8; 4]) -> Result<Self> {
-        let val = u32::from_le_bytes(raw);
-        Self::from_bits(val).ok_or_else(|| Error::InvalidProps(val))
-    }
-}
-
-impl TryFrom<&[u8]> for Property {
-    type Error = Error;
-    fn try_from(raw: &[u8]) -> Result<Self> {
-        if raw.len() < 4 {
-            return Err(Error::NotEnoughData {
-                actual: raw.len(),
-                needed: 4,
-            });
-        }
-        let (raw, _) = raw.split_array_ref_();
-        Self::try_from(*raw)
-    }
-}
-
 /// 48-bit unsigned int type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Ule48 {
     raw: [u8; 6],
@@ -149,12 +156,7 @@ pub struct Ule48 {
 impl TryFrom<&[u8]> for Ule48 {
     type Error = Error;
     fn try_from(raw: &[u8]) -> Result<Self> {
-        if raw.len() < 6 {
-            return Err(Error::NotEnoughData {
-                actual: raw.len(),
-                needed: 6,
-            });
-        }
+        Error::check_size_exact::<Self>(raw.len())?;
         let (raw, _) = raw.split_array_ref_();
         Ok(Self::from(*raw))
     }
@@ -187,11 +189,37 @@ impl From<Ule48> for u64 {
 }
 
 /// Object sizes (current and allocated)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(C)]
 pub struct Sizes {
     pub current: u32,
     pub allocated: u32,
+}
+
+impl From<&[u8; 8]> for Sizes {
+    fn from(raw: &[u8; 8]) -> Self {
+        let raw = raw.as_ref();
+        let (current, raw) = raw.split_array_ref_();
+        let (allocated, _) = raw.split_array_ref_();
+        let current = u32::from_le_bytes(*current);
+        let allocated = u32::from_le_bytes(*allocated);
+        Self { current, allocated }
+    }
+}
+
+impl From<[u8; 8]> for Sizes {
+    fn from(raw: [u8; 8]) -> Self {
+        Self::from(&raw)
+    }
+}
+
+impl TryFrom<&[u8]> for Sizes {
+    type Error = Error;
+    fn try_from(raw: &[u8]) -> Result<Self> {
+        Error::check_size_exact::<Self>(raw.len())?;
+        let (raw, _) = raw.split_array_ref_();
+        Ok(Self::from(raw))
+    }
 }
 
 macro_rules! impl_bc {
@@ -376,12 +404,7 @@ impl TryFrom<&[u8]> for ListRes {
     fn try_from(raw: &[u8]) -> Result<Self> {
         use ListRes::*;
 
-        if raw.len() < 3 {
-            return Err(Error::NotEnoughData {
-                actual: raw.len(),
-                needed: 3,
-            });
-        }
+        Error::check_len(raw.len(), 3)?;
 
         if !matches!(raw[0].try_into()?, ListOp::Response) {
             return Err(Error::BadResponse);
@@ -389,12 +412,7 @@ impl TryFrom<&[u8]> for ListRes {
 
         match raw[2].try_into()? {
             ListRc::Success => Ok(if matches!(raw[1].try_into()?, ListOp::NumberOf) {
-                if raw.len() < 7 {
-                    return Err(Error::NotEnoughData {
-                        actual: raw.len(),
-                        needed: 77,
-                    });
-                }
+                Error::check_size_exact::<u32>(raw.len() - 3)?;
                 NumberOf {
                     count: u32::from_le_bytes(*raw[3..].as_ref().split_array_ref_().0),
                 }
@@ -487,12 +505,7 @@ impl TryFrom<&[u8]> for ActionRes {
     fn try_from(raw: &[u8]) -> Result<Self> {
         use ActionRes::*;
 
-        if raw.len() < 3 {
-            return Err(Error::NotEnoughData {
-                actual: raw.len(),
-                needed: 3,
-            });
-        }
+        Error::check_len(raw.len(), 3)?;
 
         if !matches!(raw[0].try_into()?, ActionOp::Response) {
             return Err(Error::BadResponse);
@@ -501,12 +514,7 @@ impl TryFrom<&[u8]> for ActionRes {
         match raw[2].try_into()? {
             ActionRc::Success => Ok(match raw[1].try_into()? {
                 ActionOp::CheckSum => {
-                    if raw.len() < 7 {
-                        return Err(Error::NotEnoughData {
-                            actual: raw.len(),
-                            needed: 7,
-                        });
-                    }
+                    Error::check_size_exact::<u32>(raw.len() - 3)?;
                     CheckSum {
                         value: u32::from_le_bytes(*raw[3..].as_ref().split_array_ref_().0),
                     }
@@ -566,12 +574,7 @@ impl From<&[u8; 7]> for DateTime {
 impl TryFrom<&[u8]> for DateTime {
     type Error = Error;
     fn try_from(raw: &[u8]) -> Result<Self> {
-        if raw.len() < 7 {
-            return Err(Error::NotEnoughData {
-                actual: raw.len(),
-                needed: 7,
-            });
-        }
+        Error::check_len_exact(raw.len(), 7)?;
         let (dt, _) = raw.split_array_ref_();
         Ok(Self::from(dt))
     }
@@ -664,20 +667,10 @@ impl<'i> DirEntries<'i> {
         if raw.is_empty() {
             return Ok(None);
         }
-        if raw.len() < 13 {
-            return Err(Error::NotEnoughData {
-                actual: raw.len(),
-                needed: 13,
-            });
-        }
+        Error::check_len(raw.len(), 13)?;
         let (record_len, _) = raw.split_array_ref_();
         let record_len = u16::from_le_bytes(*record_len) as usize;
-        if raw.len() < record_len {
-            return Err(Error::NotEnoughData {
-                actual: raw.len(),
-                needed: record_len,
-            });
-        }
+        Error::check_len(raw.len(), record_len)?;
         let (rec, rest) = raw.split_at(record_len);
         Ok(Some((&rec[2..], rest)))
     }
@@ -728,47 +721,30 @@ impl<'i> core::iter::FusedIterator for DirEntries<'i> {}
 impl TryFrom<&[u8]> for Metadata {
     type Error = Error;
     fn try_from(raw: &[u8]) -> Result<Self> {
-        if raw.len() < 11 {
-            return Err(Error::NotEnoughData {
-                actual: raw.len(),
-                needed: 11,
-            });
-        }
+        Error::check_len(raw.len(), 11)?;
         let (id, raw) = raw.split_array_ref_();
         let id = Some(Ule48::from(*id).into());
         let (name_len, raw) = raw.split_array_ref_();
         let name_len = u8::from_le_bytes(*name_len) as usize;
-        if raw.len() < name_len + 1 + 2 {
-            return Err(Error::NotEnoughData {
-                actual: raw.len(),
-                needed: name_len + 1 + 2,
-            });
-        }
+        Error::check_len(raw.len(), name_len + 1 + 2)?;
         let (name, raw) = raw.split_at(name_len);
         let name = core::str::from_utf8(name)?.into();
         let (flags, raw) = raw.split_array_ref_();
         let flags = u8::from_le_bytes(*flags);
-        let flags = DirFlag::from_bits(flags).ok_or_else(|| Error::InvalidDirFlags(flags))?;
+        let flags = DirFlag::from_bits(flags).ok_or(Error::BadDirFlags(flags))?;
         let (type_, raw) = if flags.contains(DirFlag::TypeUuid128) {
-            if raw.len() < 16 {
-                return Err(Error::NotEnoughData {
-                    actual: raw.len(),
-                    needed: 16,
-                });
-            }
+            Error::check_len(raw.len(), 16)?;
             let (uuid, raw) = raw.split_array_ref_();
             (Uuid::from_bytes(*uuid), raw)
         } else {
             let (uuid, raw) = raw.split_array_ref_();
-            (bluez_async::uuid_from_u16(u16::from_le_bytes(*uuid)), raw)
+            (
+                Uuid::from_u128(UUID_BASE | ((u16::from_le_bytes(*uuid) as u128) << 96)),
+                raw,
+            )
         };
         let (current_size, raw) = if flags.contains(DirFlag::HasCurrentSize) {
-            if raw.len() < 4 {
-                return Err(Error::NotEnoughData {
-                    actual: raw.len(),
-                    needed: 4,
-                });
-            }
+            Error::check_len(raw.len(), 4)?;
             let (size, raw) = raw.split_array_ref_();
             let size = u32::from_le_bytes(*size);
             (Some(size as usize), raw)
@@ -776,12 +752,7 @@ impl TryFrom<&[u8]> for Metadata {
             (None, raw)
         };
         let (allocated_size, raw) = if flags.contains(DirFlag::HasAllocatedSize) {
-            if raw.len() < 4 {
-                return Err(Error::NotEnoughData {
-                    actual: raw.len(),
-                    needed: 4,
-                });
-            }
+            Error::check_len(raw.len(), 4)?;
             let (size, raw) = raw.split_array_ref_();
             let size = u32::from_le_bytes(*size);
             (Some(size as usize), raw)
@@ -789,12 +760,7 @@ impl TryFrom<&[u8]> for Metadata {
             (None, raw)
         };
         let (first_created, raw) = if flags.contains(DirFlag::HasFirstCreated) {
-            if raw.len() < 7 {
-                return Err(Error::NotEnoughData {
-                    actual: raw.len(),
-                    needed: 7,
-                });
-            }
+            Error::check_len(raw.len(), 7)?;
             let (time, raw) = raw.split_array_ref_();
             let time = DateTime::from(time);
             (Some(time), raw)
@@ -802,12 +768,7 @@ impl TryFrom<&[u8]> for Metadata {
             (None, raw)
         };
         let (last_modified, raw) = if flags.contains(DirFlag::HasFirstCreated) {
-            if raw.len() < 7 {
-                return Err(Error::NotEnoughData {
-                    actual: raw.len(),
-                    needed: 7,
-                });
-            }
+            Error::check_len(raw.len(), 7)?;
             let (time, raw) = raw.split_array_ref_();
             let time = DateTime::from(time);
             (Some(time), raw)
@@ -815,12 +776,7 @@ impl TryFrom<&[u8]> for Metadata {
             (None, raw)
         };
         let (properties, _raw) = if flags.contains(DirFlag::HasProperties) {
-            if raw.len() < 4 {
-                return Err(Error::NotEnoughData {
-                    actual: raw.len(),
-                    needed: 4,
-                });
-            }
+            Error::check_len(raw.len(), 4)?;
             let (props, raw) = raw.split_array_ref_();
             let props = Property::try_from(*props)?;
             (props, raw)

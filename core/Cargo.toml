@@ -1,41 +1,41 @@
 [package]
-name = "bluez-async-ots"
+name = "ots-core"
 version = "0.2.0"
 authors = ["K. <kayo@illumium.org"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Bluetooth Object Transfer Service (OTS) Client for bluez-async."
+description = "Bluetooth Object Transfer Service (OTS) core."
 repository = "https://github.com/katyo/bluetooth-ots-rs/"
 keywords = ["ble", "bluetooth", "bluez", "ots", "object-transfer"]
 categories = ["api-bindings", "hardware-support", "os::linux-apis"]
 
-[workspace]
-members = ["core", "cli"]
-
 [dependencies]
 uuid = "1"
+libc = "0.2"
+socket2 = "0.5"
 thiserror = "1"
+macaddr = "1"
 
-[dependencies.log]
-version = "0.4"
-
-[dependencies.futures]
+[dependencies.time]
 version = "0.3"
-
-[dependencies.ots-core]
-path = "core"
-
-[dependencies.bluez-async]
-version = "0.7"
-
-[dependencies.tokio]
-version = "1"
 default-features = false
-features = ["time", "io-util"]
+optional = true
+
+[dependencies.chrono]
+version = "0.4"
+default-features = false
+optional = true
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+optional = true
+
+[dependencies.bitflags]
+version = "2"
+default-features = false
 
 [features]
 default = []
-serde = ["ots-core/serde"]
-time = ["ots-core/time"]
-chrono = ["ots-core/chrono"]
+serde = ["dep:serde", "bitflags/serde", "uuid/serde"]
 all = ["serde", "time", "chrono"]

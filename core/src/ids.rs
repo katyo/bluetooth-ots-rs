@@ -61,11 +61,11 @@ pub mod characteristic {
         - uuid: 0x2AC6
           name: "Object List Control Point"
           id: org.bluetooth.characteristic.object_list_control_point
-        //- uuid: 0x2AC7
-        //  name: "Object List Filter"
-        //  id: org.bluetooth.characteristic.object_list_filter
-        //- uuid: 0x2AC8
-        //  name: "Object Changed"
-        //  id: org.bluetooth.characteristic.object_changed
+        - uuid: 0x2AC7
+          name: "Object List Filter"
+          id: org.bluetooth.characteristic.object_list_filter
+        - uuid: 0x2AC8
+          name: "Object Changed"
+          id: org.bluetooth.characteristic.object_changed
     }
 }

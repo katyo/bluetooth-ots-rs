@@ -200,7 +200,7 @@ jobs:
         run: cargo test --all --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }} ${{ matrix.test_args }}
 
   publish:
-    if: github.repository == 'katyo/bluez-async-ots' && startsWith(github.ref, 'refs/tags/')
+    if: github.repository == 'katyo/bluetooth-ots-rs' && startsWith(github.ref, 'refs/tags/')
     needs:
       - test
     runs-on: ubuntu-20.04

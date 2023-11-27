@@ -1,5 +1,5 @@
 use bluez_async::BluetoothSession;
-use bluez_async_ots::{ClientConfig, DirEntries, OtsClient};
+use bluez_async_ots::{ClientConfig, CoreError, DirEntries, OtsClient};
 use core::time::Duration;
 use either::Either;
 use tokio::{io::AsyncReadExt, time::sleep};
@@ -17,7 +17,7 @@ pub enum Error {
     #[error("Bluetooth Error: {0}")]
     BtError(#[from] bluez_async::BluetoothError),
     #[error("OTS Error: {0}")]
-    OTSError(#[from] bluez_async_ots::Error),
+    OtsError(#[from] bluez_async_ots::Error),
     #[error("Invalid UTF8 string: {0}")]
     Utf8Error(#[from] core::str::Utf8Error),
     #[error("No adapter found")]
@@ -38,6 +38,12 @@ impl From<std::string::FromUtf8Error> for Error {
     }
 }
 
+impl From<CoreError> for Error {
+    fn from(err: CoreError) -> Self {
+        Error::OtsError(err.into())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     pretty_env_logger::init();
@@ -46,6 +52,7 @@ async fn main() -> Result<()> {
 
     let config = ClientConfig {
         privileged: args.privileged,
+        ..Default::default()
     };
 
     let (_, bs) = BluetoothSession::new().await?;

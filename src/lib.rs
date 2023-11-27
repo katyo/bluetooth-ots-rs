@@ -2,27 +2,31 @@
 #![deny(bad_style, missing_docs)]
 #![doc = include_str!("../README.md")]
 
-mod ids;
 mod l2cap;
-mod types;
+
+use ots_core::{
+    ids,
+    l2cap::{AddressType, L2capSockAddr as SocketAddr, Psm, SocketType},
+    types, Sizes,
+};
 
 use bluez_async::{
     AdapterId, BluetoothError, BluetoothEvent, BluetoothSession, CharacteristicEvent,
     CharacteristicId, DeviceId,
 };
-use bytemuck::{Pod, Zeroable};
 use futures::stream::StreamExt;
 use uuid::Uuid;
 
-use l2cap::{
-    L2capSockAddr as SocketAddr, L2capSocket as Socket, L2capStream as Stream, SocketType,
-};
-use types::{ActionReq, ActionRes, ListReq, ListRes, OpType, Ule48};
+use l2cap::{L2capSocket as Socket, L2capStream as Stream};
+use types::{ActionReq, ActionRes, ListReq, ListRes, Ule48};
 
-pub use l2cap::{Security, SecurityLevel};
-pub use types::{
-    ActionFeature, ActionRc, DateTime, DirEntries, ListFeature, ListRc, Metadata, Property,
-    SortOrder, WriteMode,
+pub use ots_core::{
+    l2cap::{Security, SecurityLevel},
+    types::{
+        ActionFeature, ActionRc, DateTime, DirEntries, ListFeature, ListRc, Metadata, Property,
+        SortOrder, WriteMode,
+    },
+    Error as CoreError,
 };
 
 /// OTS client result
@@ -33,16 +37,19 @@ pub type Result<T> = core::result::Result<T, Error>;
 pub enum Error {
     /// Input/output error
     #[error("Input/Output Error: {0}")]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
     /// Bluetooth error
     #[error("Bluetooth error: {0}")]
-    BtError(#[from] BluetoothError),
-    /// UTF-8 decoding error
-    #[error("Invalid UTF8 string: {0}")]
-    Utf8Error(#[from] core::str::Utf8Error),
-    /// UUID decoding error
-    #[error("Invalid UUID: {0}")]
-    UuidError(#[from] uuid::Error),
+    Bt(#[from] BluetoothError),
+    /// Core error
+    #[error("OTS core error: {0}")]
+    Core(#[from] CoreError),
+    //// UTF-8 decoding error
+    //#[error("Invalid UTF8 string: {0}")]
+    //Utf8(#[from] core::str::Utf8Error),
+    //// UUID decoding error
+    //#[error("Invalid UUID: {0}")]
+    //Uuid(#[from] uuid::Error),
     /// Not supported function requested
     #[error("Not supported")]
     NotSupported,
@@ -55,45 +62,20 @@ pub enum Error {
     /// Invalid response received
     #[error("Invalid response")]
     BadResponse,
-    /// Invalid UUID size
-    #[error("Invalid UUID size: {0}")]
-    BadUuidSize(usize),
     /// Timeout reached
     #[error("Timeout reached")]
     Timeout,
-    /// Object list operation failed
-    #[error("Object list error: {0:?}")]
-    ListError(#[from] ListRc),
-    /// Object action operation failed
-    #[error("Object action error: {0:?}")]
-    ActionError(#[from] ActionRc),
-    /// Invalid properties received
-    #[error("Invalid properties: {0:08x?}")]
-    InvalidProps(u32),
-    /// Invalid directory flags received
-    #[error("Invalid directory flags: {0:02x?}")]
-    InvalidDirFlags(u8),
-    /// Not enough data to parse
-    #[error("Not enough data ({actual} < {needed})")]
-    NotEnoughData {
-        /// Actual size
-        actual: usize,
-        /// Expected size
-        needed: usize,
-    },
-    /// Invalid operation code received
-    #[error("Invalid opcode for {type_}: {code:02x?}")]
-    BadOpCode {
-        /// Operation type
-        type_: OpType,
-        /// Operation code
-        code: u8,
-    },
+}
+
+impl From<core::str::Utf8Error> for Error {
+    fn from(err: core::str::Utf8Error) -> Self {
+        Self::Core(CoreError::BadUtf8(err))
+    }
 }
 
 impl From<std::string::FromUtf8Error> for Error {
     fn from(err: std::string::FromUtf8Error) -> Self {
-        Self::Utf8Error(err.utf8_error())
+        Self::Core(CoreError::BadUtf8(err.utf8_error()))
     }
 }
 
@@ -104,16 +86,9 @@ pub struct ClientConfig {
     ///
     /// If `true` the L2CAP sockets will be openned in privileged mode.
     pub privileged: bool,
-}
 
-/// Object sizes (current and allocated)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable)]
-#[repr(C)]
-pub struct Sizes {
-    /// Current size of object
-    pub current: usize,
-    /// Allocated size of object
-    pub allocated: usize,
+    /// L2cap socket security to set
+    pub security: Option<Security>,
 }
 
 /// Object Transfer Service (OTS) client
@@ -123,6 +98,7 @@ pub struct OtsClient {
     device_id: DeviceId,
     adapter_addr: SocketAddr,
     device_addr: SocketAddr,
+    sock_security: Option<Security>,
     action_features: ActionFeature,
     list_features: ListFeature,
     oacp_chr: CharacteristicId,
@@ -191,8 +167,8 @@ impl OtsClient {
             .await?;
         log::trace!("Feature Raw: {ots_feature_val:?}");
 
-        let action_features = *bytemuck::from_bytes(&ots_feature_val[0..4]);
-        let list_features = *bytemuck::from_bytes(&ots_feature_val[4..8]);
+        let action_features = (&ots_feature_val[0..4]).try_into()?;
+        let list_features = (&ots_feature_val[4..8]).try_into()?;
         log::info!("OTS Feature: {action_features:?} {list_features:?}");
 
         let oacp_chr = session
@@ -297,14 +273,39 @@ impl OtsClient {
         }
         let (adapter_info, device_info) = adapter_and_device_info.ok_or_else(|| Error::NotFound)?;
 
+        fn socketaddr_new(
+            mac: bluez_async::MacAddress,
+            type_: bluez_async::AddressType,
+            psm: Psm,
+        ) -> SocketAddr {
+            let mac: [u8; 6] = mac.into();
+            let type_ = match type_ {
+                bluez_async::AddressType::Public => AddressType::Public,
+                bluez_async::AddressType::Random => AddressType::Random,
+            };
+
+            SocketAddr::new(mac.into(), type_, psm)
+        }
+
         let adapter_addr = if config.privileged {
-            SocketAddr::new_le_cid_ots(adapter_info.mac_address, adapter_info.address_type)
+            socketaddr_new(
+                [0, 0, 0, 0, 0, 0].into(),
+                bluez_async::AddressType::Random,
+                Psm::L2CapLeCidOts,
+            )
         } else {
-            SocketAddr::new_le_dyn_start(adapter_info.mac_address, adapter_info.address_type)
+            socketaddr_new(
+                adapter_info.mac_address,
+                adapter_info.address_type,
+                Psm::L2CapLeDynStart,
+            )
         };
 
-        let device_addr =
-            SocketAddr::new_le_cid_ots(device_info.mac_address, device_info.address_type);
+        let device_addr = socketaddr_new(
+            device_info.mac_address,
+            device_info.address_type,
+            Psm::L2CapLeCidOts,
+        );
 
         Ok(Self {
             session: session.clone(),
@@ -312,6 +313,7 @@ impl OtsClient {
             device_id: device_id.clone(),
             adapter_addr,
             device_addr,
+            sock_security: config.security,
             action_features,
             list_features,
             oacp_chr,
@@ -340,7 +342,7 @@ impl OtsClient {
     pub async fn id(&self) -> Result<Option<u64>> {
         if let Some(chr) = &self.id_chr {
             let raw = self.session.read_characteristic_value(chr).await?;
-            Ok(Some(Ule48::try_from(raw.as_ref())?.into()))
+            Ok(Some(Ule48::try_from(&raw[..])?.into()))
         } else {
             Ok(None)
         }
@@ -361,40 +363,36 @@ impl OtsClient {
             .session
             .read_characteristic_value(&self.type_chr)
             .await?;
-        types::uuid_from_raw(raw.as_ref())
+        Ok(types::uuid_from_raw(&raw[..])?)
     }
 
     /// Get sizes of current object
     pub async fn size(&self) -> Result<Sizes> {
-        let raw_sizes = self
+        let raw = self
             .session
             .read_characteristic_value(&self.size_chr)
             .await?;
-        let sizes: &types::Sizes = bytemuck::from_bytes(&raw_sizes);
-        Ok(Sizes {
-            current: sizes.current as _,
-            allocated: sizes.allocated as _,
-        })
+        Ok(raw[..].try_into()?)
     }
 
     /// Get first created time for selected object
     pub async fn first_created(&self) -> Result<Option<DateTime>> {
-        if let Some(chr) = &self.crt_chr {
+        Ok(if let Some(chr) = &self.crt_chr {
             let raw = self.session.read_characteristic_value(chr).await?;
-            DateTime::try_from(raw.as_slice()).map(Some)
+            DateTime::try_from(raw.as_slice()).map(Some)?
         } else {
-            Ok(None)
-        }
+            None
+        })
     }
 
     /// Get last modified time for selected object
     pub async fn last_modified(&self) -> Result<Option<DateTime>> {
-        if let Some(chr) = &self.mod_chr {
+        Ok(if let Some(chr) = &self.mod_chr {
             let raw = self.session.read_characteristic_value(chr).await?;
-            DateTime::try_from(raw.as_slice()).map(Some)
+            DateTime::try_from(raw.as_slice()).map(Some)?
         } else {
-            Ok(None)
-        }
+            None
+        })
     }
 
     /// Get current object properties
@@ -403,7 +401,7 @@ impl OtsClient {
             .session
             .read_characteristic_value(&self.prop_chr)
             .await?;
-        Property::try_from(raw.as_ref())
+        Ok(Property::try_from(&raw[..])?)
     }
 
     /// Get current object metadata
@@ -438,7 +436,7 @@ impl OtsClient {
     pub async fn previous(&self) -> Result<bool> {
         match self.do_previous().await {
             Ok(_) => Ok(true),
-            Err(Error::ListError(ListRc::OutOfBounds)) => Ok(false),
+            Err(Error::Core(ots_core::Error::ListError(ListRc::OutOfBounds))) => Ok(false),
             Err(error) => Err(error),
         }
     }
@@ -449,7 +447,7 @@ impl OtsClient {
     pub async fn next(&self) -> Result<bool> {
         match self.do_next().await {
             Ok(_) => Ok(true),
-            Err(Error::ListError(ListRc::OutOfBounds)) => Ok(false),
+            Err(Error::Core(CoreError::ListError(ListRc::OutOfBounds))) => Ok(false),
             Err(error) => Err(error),
         }
     }
@@ -460,17 +458,16 @@ impl OtsClient {
     pub async fn go_to(&self, id: u64) -> Result<bool> {
         match self.do_go_to(id).await {
             Ok(_) => Ok(true),
-            Err(Error::ListError(ListRc::ObjectIdNotFound)) => Ok(false),
+            Err(Error::Core(CoreError::ListError(ListRc::ObjectIdNotFound))) => Ok(false),
             Err(error) => Err(error),
         }
     }
 
     async fn socket(&self) -> Result<Stream> {
         let socket = Socket::new(SocketType::SEQPACKET)?;
-        socket.set_security(&l2cap::Security {
-            level: l2cap::SecurityLevel::Medium,
-            ..Default::default()
-        })?;
+        if let Some(security) = self.sock_security.as_ref() {
+            socket.set_security(security)?;
+        }
         log::debug!("{:?}", socket.security()?);
         log::debug!("Bind to {:?}", self.adapter_addr);
         socket.bind(&self.adapter_addr)?;
@@ -648,7 +645,7 @@ macro_rules! impl_fns {
         $(
             async fn $req_func(&self, req: &$req_type) -> Result<$res_type> {
                 let res = self.request(impl_fns!(# self.$char_field $(: $char_kind)*), req).await?;
-                res.as_slice().try_into()
+                Ok(res.as_slice().try_into()?)
             }
 
             $(
