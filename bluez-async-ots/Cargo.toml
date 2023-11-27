@@ -20,6 +20,7 @@ version = "0.4"
 version = "0.3"
 
 [dependencies.ots-core]
+version = "0.2"
 path = "../core"
 
 [dependencies.bluez-async]
