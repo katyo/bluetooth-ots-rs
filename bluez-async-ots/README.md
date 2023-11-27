@@ -7,5 +7,54 @@
 [![Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-brightgreen.svg?style=for-the-badge)](https://opensource.org/licenses/apache-2-0)
 [![CI](https://img.shields.io/github/actions/workflow/status/katyo/bluetooth-ots-rs/ci.yml?branch=master&style=for-the-badge&logo=github-actions&logoColor=white)](https://github.com/katyo/bluetooth-ots-rs/actions?query=workflow%3ARust)
 
-This crate implements Bluetooth Object Transfer Service (OTS).
+This crate implements Bluetooth Object Transfer Service (OTS) client for [bluez](http://www.bluez.org/) using [bluez-async](https://crates.io/crates/bluez-async).
 Implementation compatible with [OTS 1.0](https://www.bluetooth.com/specifications/specs/object-transfer-service-1-0/) specification.
+
+## Usage example
+
+```rust,no_run
+use bluez_async::{BluetoothSession, DeviceId};
+use bluez_async_ots::{DirEntries, OtsClient, Result};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // First initiate bluetooth session as usual
+    let (_, bs) = BluetoothSession::new().await?;
+
+    // Next discover and connect to get interesting device identifier
+    let dev_id: DeviceId = todo!();
+
+    // Create OTS client using session and device id
+    // Session will be cloned by client internally
+    let ots = OtsClient::new(&bs, &dev_id, &Default::default()).await?;
+
+    // Now you can list objects by reading special object with zero id
+
+    // First we need select required object by identifier
+    ots.go_to(0).await?;
+    // Follow we can read binary data from current object
+    let data = ots.read(0, None).await?;
+    // To extract objects info from binary data we have create iterator
+    for entry in DirEntries::from(data.as_ref()) {
+        println!("{:?}", entry?);
+    }
+
+    // Sometimes server hasn't provide special object with objects info
+    // In such case alternative way of exploring objects is selecting
+    // first (or last) object and iterate over list to last (or first)
+    // step by step
+
+    // Select first available object
+    ots.first().await?;
+    loop {
+        // Get all available info about current object
+        println!("{:?}", ots.metadata().await?);
+        // Try go to the next object
+        if !ots.next().await? {
+            break;
+        }
+    }
+
+    Ok(())
+}
+```
