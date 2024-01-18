@@ -14,7 +14,7 @@ use bluez_async::{
     AdapterId, BluetoothError, BluetoothEvent, BluetoothSession, CharacteristicEvent,
     CharacteristicId, DeviceId,
 };
-use futures::stream::StreamExt;
+use futures_util::{pin_mut, stream::StreamExt};
 use uuid::Uuid;
 
 use l2cap::{L2capSocket as Socket, L2capStream as Stream};
@@ -619,7 +619,7 @@ impl OtsClient {
             })
             .take(1)
             .take_until(tokio::time::sleep(core::time::Duration::from_secs(1)));
-        futures::pin_mut!(resps);
+        pin_mut!(resps);
 
         let req = req.into();
         log::trace!("Req: {req:?}");

@@ -2,6 +2,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+use futures_util::ready;
 use ots_core::l2cap::{self, L2capSockAddr};
 use std::{
     io::Result,
@@ -78,7 +79,7 @@ impl tokio::io::AsyncRead for L2capStream {
         use std::io::Read;
 
         loop {
-            let mut guard = futures::ready!(self.inner.poll_read_ready_mut(cx)?);
+            let mut guard = ready!(self.inner.poll_read_ready_mut(cx)?);
 
             let unfilled = buf.initialize_unfilled();
             match guard.try_io(|inner| {
@@ -104,10 +105,8 @@ impl tokio::io::AsyncWrite for L2capStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        //use std::io::Write;
-
         loop {
-            let mut guard = futures::ready!(self.inner.poll_write_ready(cx))?;
+            let mut guard = ready!(self.inner.poll_write_ready(cx))?;
 
             match guard.try_io(|inner| inner.get_ref().inner.send(buf)) {
                 Ok(result) => return Poll::Ready(result),

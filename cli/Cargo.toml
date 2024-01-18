@@ -1,36 +1,44 @@
 [package]
 name = "ots-client"
-version = "0.2.0"
-authors = ["K. <kayo@illumium.org"]
-edition = "2021"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
 description = "Bluetooth Object Transfer Service (OTS) Client command-line tool."
-repository = "https://github.com/katyo/bluetooth-ots-rs/"
 keywords = ["ble", "bluetooth", "bluez", "ots", "object-transfer"]
 categories = ["command-line-utilities"]
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
-hex_pp = "0.1"
-either = "1"
-thiserror = "1"
-
-[dependencies.clap]
-version = "4"
-features = ["derive"]
+hex_pp.workspace = true
+either.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+bluez-async.workspace = true
+bluez-async-ots.workspace = true
 
 [dependencies.log]
-version = "0.4"
+workspace = true
+optional = true
 
 [dependencies.pretty_env_logger]
-version = "0.5"
+workspace = true
+optional = true
 
-[dependencies.bluez-async]
-version = "0.7"
+[dependencies.tracing]
+workspace = true
+optional = true
 
-[dependencies.bluez-async-ots]
-version = "0.2"
-path = "../bluez-async-ots"
+[dependencies.tracing-subscriber]
+workspace = true
+optional = true
 
 [dependencies.tokio]
-version = "1"
+workspace = true
 features = ["macros", "rt", "rt-multi-thread", "fs", "io-std"]
+
+[features]
+default = ["log"]
+log = ["dep:log", "bluez-async-ots/log", "pretty_env_logger"]
+tracing = ["dep:tracing", "tracing-subscriber"]

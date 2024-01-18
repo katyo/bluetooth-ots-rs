@@ -1,39 +1,34 @@
 [package]
 name = "ots-core"
-version = "0.2.0"
-authors = ["K. <kayo@illumium.org"]
-edition = "2021"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
 description = "Bluetooth Object Transfer Service (OTS) core."
-repository = "https://github.com/katyo/bluetooth-ots-rs/"
 keywords = ["ble", "bluetooth", "bluez", "ots", "object-transfer"]
 categories = ["api-bindings", "hardware-support", "os::linux-apis"]
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
-uuid = "1"
-libc = "0.2"
-socket2 = "0.5"
-thiserror = "1"
-macaddr = "1"
+uuid.workspace = true
+libc.workspace = true
+socket2.workspace = true
+thiserror.workspace = true
+macaddr.workspace = true
+bitflags.workspace = true
 
 [dependencies.time]
-version = "0.3"
-default-features = false
+workspace = true
 optional = true
 
 [dependencies.chrono]
-version = "0.4"
-default-features = false
+workspace = true
 optional = true
 
 [dependencies.serde]
-version = "1"
-features = ["derive"]
+workspace = true
 optional = true
-
-[dependencies.bitflags]
-version = "2"
-default-features = false
 
 [features]
 default = []

@@ -1,3 +1,52 @@
 [workspace]
 resolver = "2"
 members = ["core", "bluez-async-ots", "cli"]
+
+[workspace.package]
+version = "0.3.0"
+authors = ["K. <kayo@illumium.org"]
+license = "MIT OR Apache-2.0"
+edition = "2021"
+repository = "https://github.com/katyo/bluetooth-ots-rs"
+homepage = "https://github.com/katyo/bluetooth-ots-rs"
+
+[workspace.dependencies]
+uuid = "1"
+libc = "0.2"
+socket2 = "0.5"
+thiserror = "1"
+macaddr = "1"
+log = "0.4"
+pretty_env_logger = "0.5"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+futures-util = "0.3"
+bluez-async = "0.7"
+either = "1"
+hex_pp = "0.1"
+ots-core.path = "core"
+bluez-async-ots.path = "bluez-async-ots"
+
+[workspace.dependencies.time]
+version = "0.3"
+default-features = false
+
+[workspace.dependencies.chrono]
+version = "0.4"
+default-features = false
+
+[workspace.dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[workspace.dependencies.bitflags]
+version = "2"
+default-features = false
+
+[workspace.dependencies.tokio]
+version = "1"
+default-features = false
+
+[workspace.dependencies.clap]
+version = "4"
+features = ["derive"]

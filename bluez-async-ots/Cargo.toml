@@ -1,34 +1,34 @@
 [package]
 name = "bluez-async-ots"
-version = "0.2.0"
-authors = ["K. <kayo@illumium.org"]
-edition = "2021"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
 description = "Bluetooth Object Transfer Service (OTS) Client for bluez-async."
-repository = "https://github.com/katyo/bluetooth-ots-rs/"
 keywords = ["ble", "bluetooth", "bluez", "ots", "object-transfer"]
 categories = ["api-bindings", "hardware-support", "os::linux-apis"]
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
-uuid = "1"
-thiserror = "1"
+uuid.workspace = true
+thiserror.workspace = true
+ots-core.workspace = true
+bluez-async.workspace = true
 
 [dependencies.log]
-version = "0.4"
+workspace = true
+optional = true
 
-[dependencies.futures]
-version = "0.3"
+[dependencies.tracing]
+workspace = true
+optional = true
 
-[dependencies.ots-core]
-version = "0.2"
-path = "../core"
-
-[dependencies.bluez-async]
-version = "0.7"
+[dependencies.futures-util]
+workspace = true
 
 [dependencies.tokio]
-version = "1"
-default-features = false
+workspace = true
 features = ["time", "io-util"]
 
 [features]
