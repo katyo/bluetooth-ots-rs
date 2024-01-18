@@ -32,6 +32,7 @@ optional = true
 
 [dependencies.tracing-subscriber]
 workspace = true
+features = ["env-filter"]
 optional = true
 
 [dependencies.tokio]
@@ -39,6 +40,6 @@ workspace = true
 features = ["macros", "rt", "rt-multi-thread", "fs", "io-std"]
 
 [features]
-default = ["log"]
+default = ["tracing"]
 log = ["dep:log", "bluez-async-ots/log", "pretty_env_logger"]
-tracing = ["dep:tracing", "tracing-subscriber"]
+tracing = ["dep:tracing", "bluez-async-ots/tracing", "tracing-subscriber"]

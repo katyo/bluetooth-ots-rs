@@ -2,6 +2,26 @@
 #![deny(bad_style, missing_docs)]
 #![doc = include_str!("../README.md")]
 
+#[cfg(all(feature = "log", not(feature = "tracing")))]
+use log::{debug, info, trace};
+
+#[cfg(feature = "tracing")]
+use tracing::{debug, info, trace};
+
+#[cfg(not(any(feature = "log", feature = "tracing")))]
+#[macro_use]
+mod log_stub {
+    macro_rules! info {
+        ($($t:tt)*) => {};
+    }
+    macro_rules! debug {
+        ($($t:tt)*) => {};
+    }
+    macro_rules! trace {
+        ($($t:tt)*) => {};
+    }
+}
+
 mod l2cap;
 
 use ots_core::{
@@ -142,6 +162,14 @@ impl AsRef<ListFeature> for OtsClient {
     }
 }
 
+impl core::fmt::Debug for OtsClient {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        f.debug_struct("OtsClient")
+            .field("device", &self.device_id)
+            .finish()
+    }
+}
+
 impl OtsClient {
     /// Create new client instance
     pub async fn new(
@@ -152,24 +180,24 @@ impl OtsClient {
         let ots_srv = session
             .get_service_by_uuid(device_id, ids::service::object_transfer)
             .await?;
-        log::debug!("Service: {ots_srv:#?}");
+        debug!("Service: {ots_srv:#?}");
 
-        let ots_chrs = session.get_characteristics(&ots_srv.id).await?;
-        log::debug!("Characteristics: {ots_chrs:#?}");
+        let _ots_chrs = session.get_characteristics(&ots_srv.id).await?;
+        trace!("Characteristics: {_ots_chrs:#?}");
 
         let ots_feature_chr = session
             .get_characteristic_by_uuid(&ots_srv.id, ids::characteristic::ots_feature)
             .await?;
-        log::debug!("Feature Char: {ots_feature_chr:#?}");
+        debug!("Feature Char: {ots_feature_chr:#?}");
 
         let ots_feature_val = session
             .read_characteristic_value(&ots_feature_chr.id)
             .await?;
-        log::trace!("Feature Raw: {ots_feature_val:?}");
+        trace!("Feature Raw: {ots_feature_val:?}");
 
         let action_features = (&ots_feature_val[0..4]).try_into()?;
         let list_features = (&ots_feature_val[4..8]).try_into()?;
-        log::info!("OTS Feature: {action_features:?} {list_features:?}");
+        info!("OTS Feature: {action_features:?} {list_features:?}");
 
         let oacp_chr = session
             .get_characteristic_by_uuid(
@@ -177,7 +205,7 @@ impl OtsClient {
                 ids::characteristic::object_action_control_point,
             )
             .await?;
-        log::debug!("OACP Char: {oacp_chr:#?}");
+        trace!("OACP Char: {oacp_chr:#?}");
         let oacp_chr = oacp_chr.id;
 
         let olcp_chr = session
@@ -191,7 +219,7 @@ impl OtsClient {
                     Err(error)
                 }
             })?;
-        log::debug!("OLCP Char: {olcp_chr:#?}");
+        trace!("OLCP Char: {olcp_chr:#?}");
         let olcp_chr = olcp_chr.map(|chr| chr.id);
 
         let id_chr = session
@@ -205,31 +233,31 @@ impl OtsClient {
                     Err(error)
                 }
             })?;
-        log::debug!("Id Char: {id_chr:#?}");
+        trace!("Id Char: {id_chr:#?}");
         let id_chr = id_chr.map(|chr| chr.id);
 
         let name_chr = session
             .get_characteristic_by_uuid(&ots_srv.id, ids::characteristic::object_name)
             .await?;
-        log::debug!("Name Char: {name_chr:#?}");
+        trace!("Name Char: {name_chr:#?}");
         let name_chr = name_chr.id;
 
         let type_chr = session
             .get_characteristic_by_uuid(&ots_srv.id, ids::characteristic::object_type)
             .await?;
-        log::debug!("Type Char: {type_chr:#?}");
+        trace!("Type Char: {type_chr:#?}");
         let type_chr = type_chr.id;
 
         let size_chr = session
             .get_characteristic_by_uuid(&ots_srv.id, ids::characteristic::object_size)
             .await?;
-        log::debug!("Size Char: {size_chr:#?}");
+        trace!("Size Char: {size_chr:#?}");
         let size_chr = size_chr.id;
 
         let prop_chr = session
             .get_characteristic_by_uuid(&ots_srv.id, ids::characteristic::object_properties)
             .await?;
-        log::debug!("Prop Char: {prop_chr:#?}");
+        trace!("Prop Char: {prop_chr:#?}");
         let prop_chr = prop_chr.id;
 
         let crt_chr = session
@@ -243,7 +271,7 @@ impl OtsClient {
                     Err(error)
                 }
             })?;
-        log::debug!("Crt Char: {crt_chr:#?}");
+        trace!("Crt Char: {crt_chr:#?}");
         let crt_chr = crt_chr.map(|chr| chr.id);
 
         let mod_chr = session
@@ -257,7 +285,7 @@ impl OtsClient {
                     Err(error)
                 }
             })?;
-        log::debug!("Mod Char: {mod_chr:#?}");
+        trace!("Mod Char: {mod_chr:#?}");
         let mod_chr = mod_chr.map(|chr| chr.id);
 
         let mut adapter_and_device_info = None;
@@ -468,27 +496,26 @@ impl OtsClient {
         if let Some(security) = self.sock_security.as_ref() {
             socket.set_security(security)?;
         }
-        log::debug!("{:?}", socket.security()?);
-        log::debug!("Bind to {:?}", self.adapter_addr);
+        debug!("Bind to {:?}", self.adapter_addr);
         socket.bind(&self.adapter_addr)?;
-        log::debug!("Connect to {:?}", self.device_addr);
+        debug!("Connect to {:?}", self.device_addr);
         let stream = tokio::time::timeout(
-            core::time::Duration::from_secs(2),
+            core::time::Duration::from_secs(5),
             socket.connect(&self.device_addr),
         )
         .await
         .map_err(|_| Error::Timeout)??;
-        log::debug!(
+        debug!(
             "Local/Peer Address: {:?}/{:?}",
             stream.local_addr()?,
             stream.peer_addr()?
         );
-        log::debug!(
+        debug!(
             "Send/Recv MTU: {:?}/{}",
             stream.send_mtu(),
             stream.recv_mtu()?
         );
-        log::debug!("Security: {:?}", stream.security()?);
+        debug!("Security: {:?}", stream.security()?);
         Ok(stream)
     }
 
@@ -546,7 +573,7 @@ impl OtsClient {
 
         self.do_read(offset, length).await?;
 
-        log::debug!("recv/send mtu: {}/{}", stm.recv_mtu()?, stm.send_mtu()?);
+        debug!("recv/send mtu: {}/{}", stm.recv_mtu()?, stm.send_mtu()?);
 
         Ok(stm)
     }
@@ -587,12 +614,15 @@ impl OtsClient {
 
         self.do_write(offset, length, mode).await?;
 
-        log::debug!("recv/send mtu: {}/{}", stm.recv_mtu()?, stm.send_mtu()?);
-
         Ok(stm)
     }
 
-    async fn request(&self, chr: &CharacteristicId, req: impl Into<Vec<u8>>) -> Result<Vec<u8>> {
+    #[cfg_attr(feature = "tracing", tracing::instrument)]
+    async fn request(
+        &self,
+        chr: &CharacteristicId,
+        req: impl Into<Vec<u8>> + core::fmt::Debug,
+    ) -> Result<Vec<u8>> {
         self.session.start_notify(chr).await?;
 
         let resps = self
@@ -600,7 +630,7 @@ impl OtsClient {
             .device_event_stream(&self.device_id)
             .await?
             .filter_map(|event| {
-                log::trace!("Evt: {event:?}");
+                trace!("Evt: {event:?}");
                 core::future::ready(
                     if let BluetoothEvent::Characteristic {
                         id,
@@ -622,14 +652,12 @@ impl OtsClient {
         pin_mut!(resps);
 
         let req = req.into();
-        log::trace!("Req: {req:?}");
+        trace!("Req: {req:?}");
 
         self.session.write_characteristic_value(chr, req).await?;
 
         let res = resps.next().await.ok_or_else(|| Error::NoResponse)?;
-        {
-            log::trace!("Res: {res:?}");
-        }
+        trace!("Res: {res:?}");
 
         self.session.stop_notify(chr).await?;
 

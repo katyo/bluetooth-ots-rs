@@ -4,6 +4,29 @@ use core::time::Duration;
 use either::Either;
 use tokio::{io::AsyncReadExt, time::sleep};
 
+#[cfg(all(feature = "log", not(feature = "tracing")))]
+use log::{debug, info, trace, warn};
+
+#[cfg(feature = "tracing")]
+use tracing::{debug, info, trace, warn};
+
+#[cfg(not(any(feature = "log", feature = "tracing")))]
+#[macro_use]
+mod log_stub {
+    macro_rules! info {
+        ($($t:tt)*) => {};
+    }
+    macro_rules! warn {
+        ($($t:tt)*) => {};
+    }
+    macro_rules! debug {
+        ($($t:tt)*) => {};
+    }
+    macro_rules! trace {
+        ($($t:tt)*) => {};
+    }
+}
+
 mod cli;
 
 /// OTS command result
@@ -46,7 +69,13 @@ impl From<CoreError> for Error {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(feature = "pretty_env_logger")]
     pretty_env_logger::init();
+
+    #[cfg(feature = "tracing-subscriber")]
+    tracing_subscriber::FmtSubscriber::builder()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
 
     let args = <cli::Args as clap::Parser>::parse();
 
@@ -82,18 +111,18 @@ async fn main() -> Result<()> {
 
     if let Some(secs) = &args.disco {
         if let Some(id) = &adapter_id {
-            log::info!("Start discovery on {id:?}");
+            info!("Start discovery on {id:?}");
             bs.start_discovery_on_adapter(id).await?;
         } else {
-            log::info!("Start discovery");
+            info!("Start discovery");
             bs.start_discovery().await?;
         }
         sleep(Duration::from_secs(*secs as _)).await;
         if let Some(id) = &adapter_id {
-            log::info!("Stop discovery on {id:?}");
+            info!("Stop discovery on {id:?}");
             bs.stop_discovery_on_adapter(id).await?;
         } else {
-            log::info!("Start discovery");
+            info!("Start discovery");
             bs.stop_discovery().await?;
         }
     }
@@ -108,15 +137,15 @@ async fn main() -> Result<()> {
             _ => false,
         })
         .ok_or_else(|| Error::NoDevice)?;
-    log::debug!("Device: {dev:#?}");
+    debug!("Device: {dev:#?}");
 
     let dev_id = dev.id.clone();
-    log::info!("Device: {dev_id:?}");
+    info!("Device: {dev_id:?}");
 
     let connected = dev.connected;
 
     if !connected {
-        log::info!("Connect to device");
+        info!("Connect to device");
         bs.connect_with_timeout(&dev_id, Duration::from_secs(2))
             .await?;
     }
@@ -132,7 +161,7 @@ async fn main() -> Result<()> {
     }
 
     if !connected {
-        log::info!("Disconnect from device");
+        info!("Disconnect from device");
         bs.disconnect(&dev.id).await?;
     }
 
@@ -159,11 +188,11 @@ impl cli::ListArgs {
         if self.dir && ots.go_to(0).await.is_ok() {
             match ots.read(0, None).await {
                 Ok(data) => {
-                    log::debug!("Directory data size: {}", data.len());
+                    debug!("Directory data size: {}", data.len());
                     return self.print_directory_data(&data, ots).await;
                 }
-                Err(error) => {
-                    log::warn!("Unable to read directory data due to: {error:?}");
+                Err(_error) => {
+                    warn!("Unable to read directory data due to: {_error:?}");
                 }
             }
         }
@@ -401,7 +430,7 @@ impl cli::WriteArgs {
             &data[..]
         };
 
-        log::trace!("{}", HexDump(data));
+        trace!("{}", HexDump(data));
 
         let mode = if self.truncate {
             bluez_async_ots::WriteMode::Truncate
