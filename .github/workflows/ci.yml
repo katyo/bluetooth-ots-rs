@@ -53,12 +53,8 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --install-recommends libdbus-1-dev
-      - uses: sksat/action-clippy@main
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          reporter: github-check
-          fail_on_error: true
-          clippy_flags: --all --all-targets --all-features
+      - name: Check code
+        run: cargo clippy --all --all-targets --all-features
 
   # minver:
   #   runs-on: ubuntu-20.04
